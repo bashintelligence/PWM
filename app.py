@@ -5,7 +5,7 @@ verified findings, fixed PDF report with PoC + code-fix examples,
 enriched popup data (path, command, remediation).
 """
 
-import os, re, uuid, json, time, queue, threading, subprocess, shutil, html, socket, signal, ipaddress, select, urllib.request, urllib.parse, math as _math, inspect, shlex, hmac, tempfile
+import os, re, uuid, json, time, queue, threading, subprocess, shutil, html, socket, signal, ipaddress, select, urllib.request, urllib.parse, math as _math, inspect, shlex, hmac, tempfile, base64
 from datetime import datetime
 from flask import Flask, request, Response, jsonify, send_file, redirect
 from reportlab.lib.pagesizes import A4
@@ -367,8 +367,8 @@ CHAIN = [
             },{
                 "id": "deep_xss_probe", "label": "XSS & Injection Surface Probe", "tool": "dalfox / curl",
                 "description": "Reflected XSS, open redirect, XXE, SSTI and DOM injection probes across common parameters.",
-                "cmd_template": "echo '---XSS REFLECT---'; for p in q search id name input; do code=$(curl -skL -o /dev/null -w '%{http_code}' http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null); body=$(curl -skL http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null | grep -oi 'onerror\\|alert' | head -1); echo $p' XSS '${code}': '$body; done; echo '---OPEN REDIRECT---'; for p in next redirect url return dest; do r=$(curl -skI http://{target}/?$p=https://evil.com 2>/dev/null | grep -i 'location.*evil' | head -1); echo $p': '$r; done; echo '---XXE PROBE---'; curl -sk -X POST -H 'Content-Type: application/xml' --data-binary '<root></root>' http://{target}/ -o - 2>&1 | grep -iE 'root:|xxe|entity' | head -3; echo '---SSTI PROBE---'; curl -sk http://{target}/?name=%7B%7B7*7%7D%7D -o - 2>&1 | grep -o '49' | head -2; echo '---DALFOX---'; if command -v dalfox >/dev/null 2>&1; then dalfox url http://{target}/ --silence --no-spinner 2>&1 | head -20; else echo '[dalfox not installed — skipped]'; fi",
-                "fallback_cmd": "echo '---XSS CHECK---'; for p in q search id; do curl -sk http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E -o - 2>&1 | grep -oi 'alert' | head -1; done",
+                "cmd_template": "echo '---XSS REFLECT---'; for p in q search id name input; do code=$(curl -skL -o /dev/null -w '%{http_code}' http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null); body=$(curl -skL http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null | grep -oiF '<script>alert(1)</script>' | head -1); echo $p' XSS '${code}': '$body; done; echo '---OPEN REDIRECT---'; for p in next redirect url return dest; do r=$(curl -skI http://{target}/?$p=https://evil.com 2>/dev/null | grep -i 'location.*evil' | head -1); echo $p': '$r; done; echo '---XXE PROBE---'; curl -sk -X POST -H 'Content-Type: application/xml' --data-binary '<root></root>' http://{target}/ -o - 2>&1 | grep -iE 'root:|xxe|entity' | head -3; echo '---SSTI PROBE---'; curl -sk http://{target}/?name=%7B%7B7*7%7D%7D -o - 2>&1 | grep -o '49' | head -2; echo '---DALFOX---'; if command -v dalfox >/dev/null 2>&1; then dalfox url http://{target}/ --silence --no-spinner 2>&1 | head -20; else echo '[dalfox not installed — skipped]'; fi",
+                "fallback_cmd": "echo '---XSS CHECK---'; for p in q search id; do curl -sk http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E -o - 2>&1 | grep -oiF '<script>alert(1)</script>' | head -1; done",
                 "parse": "xss_probe",
             },
             {
@@ -748,7 +748,7 @@ ANOMALY_SIGNATURES = [
     (r"(?i)\.env[^\n]*[A-Za-z0-9_]{3,}\s*=\s*\S+", ".env with credential content exposed", "critical"),
     (r"(?i)SSLv2|SSLv3|TLSv1\.0|TLSv1\.1", "Deprecated TLS/SSL protocol enabled", "high"),
     (r"(?i)(cipher|protocol|ssl [cv]|tlsv|ssl3|accepted|preferred)\s*[:=]?[^\n]*\b(RC4|DES|3DES|EXPORT|NULL|anon)\b", "Weak cipher suite enabled", "high"),
-    (r"(?i)heartbleed|CVE-2014-0160|\bVULNERABLE\b", "Heartbleed or script-confirmed VULNERABLE service", "critical"),
+    (r"(?i)(?:heartbleed|CVE-2014-0160)[^\n]{0,60}\b(?:vulnerable|affected|confirmed)\b|\bVULNERABLE\b", "Heartbleed or script-confirmed VULNERABLE service", "critical"),
     (r"SNMPv2-MIB::sysDescr", "SNMP public community string accepted", "high"),
 ]
 
@@ -773,17 +773,35 @@ _NEGATED_RESULT = re.compile(
     re.I)
 
 
+# Signatures that assert a weak protocol / cipher / extension is ENABLED.
+# sslscan and nmap spell healthy services out literally — "TLSv1.0: disabled",
+# "RC4: rejected", "not vulnerable to heartbleed" — so a line that says the
+# feature is OFF must never satisfy one of these.
+_AFFIRMATIVE_ONLY = {
+    "Deprecated TLS/SSL protocol enabled",
+    "Weak cipher suite enabled",
+    "Heartbleed or script-confirmed VULNERABLE service",
+}
+_WEAKNESS_OFF = re.compile(
+    r"\bdisabled\b|\bnot\s+(?:supported|enabled|present|vulnerable|offered)\b|"
+    r"\bno\s+(?:support|heartbleed|rc4|sslv|tlsv)|\brejected\b", re.I)
+
+
 def sig_matches(output):
     """Line-based anomaly-signature scan yielding (msg, sev) once per signature.
 
     Negated script results ("NOT VULNERABLE", "isn't vulnerable",
-    "does not appear to be vulnerable", …) never yield a finding."""
+    "does not appear to be vulnerable", …) never yield a finding, and a
+    "… enabled" signature is only satisfied by an affirmative line."""
     seen = set()
     for line in output.splitlines():
         if not line.strip() or _NEGATED_RESULT.search(line):
             continue
+        off = bool(_WEAKNESS_OFF.search(line))
         for sig, msg, sev in ANOMALY_SIGNATURES:
             if msg in seen:
+                continue
+            if off and msg in _AFFIRMATIVE_ONLY:
                 continue
             if re.search(sig, line, re.I):
                 seen.add(msg)
@@ -1103,7 +1121,16 @@ def _finding_url(f, sess):
     p = str(f.get('path') or '')
     cmd = str(f.get('command') or '')
     if p.startswith('/'):
-        return f"http://{target}{p}"
+        # ``target`` is the host with any port stripped, so a service on
+        # :8080/8443 would have been captured against the wrong port.
+        base = ''
+        try:
+            base = _base_url(sess) or ''
+        except Exception:
+            base = ''
+        if not base:
+            base = f"http://{target}"
+        return f"{base.rstrip('/')}{p}"
     m = re.search(r'https?://\S+', cmd)
     if m:
         return m.group(0).rstrip('.').replace('"', '')
@@ -1475,11 +1502,19 @@ def run_command(sid, sub_id, cmd, timeout=PWM_CMD_TIMEOUT):
 # PARSERS — existing
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_nmap(output):
+    """nmap port table → open_port findings.
+
+    Only an unqualified ``open`` state is a finding: ``open|filtered`` (the
+    normal answer for a silent UDP port) and ``filtered``/``closed`` prove
+    nothing, and reporting them as open ports fabricated service exposure.
+    """
     findings = []
     best = {}
     for line in output.splitlines():
-        m = re.match(r'(\d+)/(tcp|udp)\s+(open\S*)\s+(\S+)\s*(.*)', line)
+        m = re.match(r'(\d+)/(tcp|udp)\s+(\S+)\s+(\S+)\s*(.*)', line)
         if m:
+            if m.group(3).lower() != 'open':
+                continue
             svc, ver = m.group(4), m.group(5).strip()
             key = (m.group(1), m.group(2))
             f = {"type":"open_port","port":m.group(1),"proto":m.group(2),
@@ -1739,19 +1774,50 @@ def parse_version_gap(output, sess):
                         pass
     return findings
 
+def _probe_sections(output):
+    """Split a multi-probe curl script's output on its ``---LABEL---`` markers.
+
+    Probe scripts run several independent requests back to back, so a status
+    code seen anywhere in the blob says nothing about any particular probe.
+    """
+    sections, name = {}, None
+    for line in output.splitlines():
+        m = re.match(r'^---([A-Z0-9 &/_-]+)---\s*$', line.strip())
+        if m:
+            name = m.group(1).strip()
+            sections.setdefault(name, [])
+            continue
+        if name is not None:
+            sections[name].append(line)
+    return {k: '\n'.join(v) for k, v in sections.items()}
+
+
 def parse_http_anomaly(output):
     findings = []
+    sections = _probe_sections(output)
     if re.search(r'root:.*:/bin/', output):
         findings.append({"type":"path_traversal","severity":"critical","path":"/../../../../etc/passwd",
             "detail":"Path traversal returned /etc/passwd content — LFI confirmed",
             "command":"curl -sk 'http://<target>/../../../../etc/passwd'"})
-    if re.search(r'HTTP/\S+ 200', output) and 'TRACE' in output:
-        findings.append({"type":"trace_method","detail":"HTTP TRACE enabled — XST risk","severity":"medium",
+    # TRACE is only enabled if ITS OWN response is 2xx. "Allow: ... TRACE" on an
+    # OPTIONS reply, or a 200 from a different probe in the same script, is not
+    # evidence — the cross-probe match reported XST on servers answering 405.
+    verb = sections.get('VERB TAMPER', '')
+    if verb and re.search(r'HTTP/\S+\s+2\d\d', verb) and \
+            not re.search(r'HTTP/\S+\s+(?:4|5)\d\d', verb):
+        findings.append({"type":"trace_method","detail":"HTTP TRACE answered 2xx — XST risk","severity":"medium",
             "path":"/","command":"curl -skI -X TRACE 'http://<target>/'"})
-    if 'evil.com' in output and re.search(r'(Location|Host).*evil\.com', output):
-        findings.append({"type":"host_header_injection","severity":"high","path":"Host header",
-            "detail":"Host header value reflected in redirect — SSRF/cache poisoning",
-            "command":"curl -skI -H 'Host: evil.com' 'http://<target>/'"})
+    # Host header injection needs a RESPONSE Location that actually points at
+    # the attacker host. A 400 rejection page quoting the forged header
+    # ("Invalid Host header: evil.com") is the opposite of a vulnerability.
+    hh = sections.get('HOST INJECT', '')
+    for line in hh.splitlines():
+        if re.match(r'\s*location\s*:', line, re.I) and 'evil.com' in line and \
+                not re.search(r'HTTP/\S+\s+[45]\d\d', hh):
+            findings.append({"type":"host_header_injection","severity":"high","path":"Host header",
+                "detail":"Host header value reflected in a redirect Location — SSRF/cache poisoning",
+                "command":"curl -skI -H 'Host: evil.com' 'http://<target>/'"})
+            break
     # .git / .env / admin — status alone proves nothing (catch-all routers 200
     # anything); findings require the probe body to actually BE the artifact.
     m = re.search(r'body:\.git\[(\d+)\] (.*)', output)
@@ -1775,21 +1841,26 @@ def parse_http_anomaly(output):
 
 def parse_timing(output):
     findings = []
-    times = re.findall(r't=([\d.]+)', output)
+    times = re.findall(r'\bt=([\d.]+)', output)
     if len(times) >= 3:
-        vals = [float(t) for t in times]
-        avg, mx = sum(vals)/len(vals), max(vals)
-        if mx > avg * 2.5:
+        vals = sorted(float(t) for t in times)
+        med = vals[len(vals)//2]          # median: one slow probe must not set the bar
+        mx = vals[-1]
+        if med > 0 and mx > med * 2.5 and (mx - med) > 0.5:
             findings.append({"type":"timing_anomaly","severity":"medium","path":"/?id=",
-                "detail":f"Response time variance avg={avg:.2f}s max={mx:.2f}s — possible blind injection",
+                "detail":f"Response time variance median={med:.2f}s max={mx:.2f}s over {len(vals)} samples — possible blind injection",
                 "command":"curl -sk -o /dev/null -w '%{time_total}' 'http://<target>/?id=1+AND+SLEEP(3)'"})
     valid = re.search(r'valid_user=([\d.]+)', output)
     invalid = re.search(r'invalid_user=([\d.]+)', output)
     if valid and invalid:
         vt, it = float(valid.group(1)), float(invalid.group(1))
-        if abs(vt-it) > 0.3:
+        fast, slow = min(vt, it), max(vt, it)
+        # Single samples each: network/cache jitter easily reaches 100-300 ms,
+        # so a small delta is not an enumeration oracle. Real oracles are a
+        # multiple apart (hashing vs no-user path), hence the ratio floor.
+        if (slow - fast) >= 0.4 and fast > 0 and slow >= fast * 2:
             findings.append({"type":"auth_timing_oracle","severity":"high","path":"/login",
-                "detail":f"Login timing differs valid={vt:.3f}s vs invalid={it:.3f}s — username enumeration",
+                "detail":f"Login timing differs valid={vt:.3f}s vs invalid={it:.3f}s ({slow/max(fast,0.001):.1f}x, single sample each) — username enumeration; repeat to confirm",
                 "command":"curl -sk -X POST 'http://<target>/login' -d 'user=admin&pass=wrong'"})
     sqli = re.search(r'sqli_probe=([\d.]+)', output)
     baseline = re.search(r'sqli_baseline=([\d.]+)', output)
@@ -1837,33 +1908,84 @@ def parse_auth_probe(output):
             "command":"curl -skI 'http://<target>/login'"})
     return findings
 
+# nmap NSE prints the script NAME on every line of its block — including its own
+# failure and its negative findings ("| smtp-open-relay: Server doesn't seem to
+# be an open relay"). Matching the script name therefore asserted the exact
+# opposite of what the target reported: a critical open-relay claim was
+# produced from a line saying the target is NOT a relay. Each check below now
+# requires the script's affirmative finding text.
+_NSE_FAILURE = re.compile(
+    r'ERROR|Script execution failed|not been found|timeout|no response|'
+    r'not supported|NT_STATUS|access denied|permission denied', re.I)
+
+_NSE_CHECKS = [
+    (re.compile(r'Recursion appears to be enabled', re.I),
+     "DNS recursion enabled — amplification DDoS risk", "high", "DNS :53",
+     "nmap --script=dns-recursion -p 53 <target>"),
+    # monlist must have actually answered with data, not merely been attempted.
+    (re.compile(r'monlist replies received|monlist: \d+\b', re.I),
+     "NTP monlist enabled — DDoS amplification", "high", "NTP :123",
+     "nmap --script=ntp-monlist -p 123 <target>"),
+    # The affirmative verdict only: nmap spells the negative one out as
+    # "Server doesn't seem to be an open relay" / "is not an open relay".
+    (re.compile(r'Server is an open relay(?!\?)', re.I),
+     "SMTP open relay confirmed", "critical", "SMTP :25",
+     "nmap --script=smtp-open-relay -p 25 <target>"),
+    # anonymous bind needs a real directory answer, not a failed base query.
+    (re.compile(r'namingContexts:\s*(?:dc=|o=|cn=)|'
+                r'result:\s*0\s+Success[\s\S]{0,200}?namingContexts', re.I),
+     "LDAP anonymous bind", "medium", "LDAP :389",
+     "nmap --script=ldap-rootdse -p 389 <target>"),
+    (re.compile(r'Anonymous FTP login allowed', re.I),
+     "FTP anonymous read/write", "high", "FTP :21",
+     "nmap --script=ftp-anon -p 21 <target>"),
+    # redis_version must be a REAL version string — "Redis server not
+    # running" must never become "Redis accessible without auth".
+    (re.compile(r'redis_version\s*[:=]\s*\d', re.I),
+     "Redis accessible without auth", "critical", "Redis :6379",
+     "redis-cli -h <target> ping"),
+    # Positive MongoDB data evidence only — "db with 0 databases" (closed
+    # port) is NOT an access finding.
+    (re.compile(r'totalSize|\bb*db\b.*with [1-9]|databases:\s*[1-9]|total\s+size\s*[1-9]', re.I),
+     "MongoDB accessible without auth", "critical", "MongoDB :27017",
+     "nmap --script=mongodb-info -p 27017 <target>"),
+]
+
+
 def parse_nse_deep(output):
     findings = []
-    checks = [
-        (r'recursion:\s*Recursion appears to be enabled', "DNS recursion enabled — amplification DDoS risk", "high", "DNS :53", "nmap --script=dns-recursion -p 53 <target>"),
-        (r'ntp-monlist', "NTP monlist enabled — DDoS amplification", "high", "NTP :123", "nmap --script=ntp-monlist -p 123 <target>"),
-        (r'smtp.*open relay|relay.*accepted', "SMTP open relay confirmed", "critical", "SMTP :25", "nmap --script=smtp-open-relay -p 25 <target>"),
-        (r'ldap.*rootDSE|namingContexts', "LDAP anonymous bind", "medium", "LDAP :389", "nmap --script=ldap-rootdse -p 389 <target>"),
-        (r'ftp-anon.*Login with password', "FTP anonymous read/write", "high", "FTP :21", "nmap --script=ftp-anon -p 21 <target>"),
-        # redis_version must be a REAL version string — "Redis server not
-        # running" must never become "Redis accessible without auth".
-        (r'redis_version\s*[:=]\s*\d', "Redis accessible without auth", "critical", "Redis :6379", "redis-cli -h <target> ping"),
-        # Positive MongoDB data evidence only — "db with 0 databases" (closed
-        # port) is NOT an access finding.
-        (r'totalSize|\bb*db\b.*with [1-9]|databases:\s*[1-9]|total\s+size\s*[1-9]', "MongoDB accessible without auth", "critical", "MongoDB :27017", "nmap --script=mongodb-info -p 27017 <target>"),
-    ]
-    for pattern, msg, sev, path, cmd in checks:
-        if re.search(pattern, output, re.I):
-            findings.append({"type":"protocol_vuln","detail":msg,"severity":sev,
-                "path":path,"command":cmd})
+    for pattern, msg, sev, path, cmd in _NSE_CHECKS:
+        hit = None
+        for line in output.splitlines():
+            if _NSE_FAILURE.search(line):
+                continue
+            m = pattern.search(line)
+            if m:
+                hit = line.strip()
+                break
+        if hit is None:
+            continue
+        findings.append({"type":"protocol_vuln","detail":msg,"severity":sev,
+            "path":path,"command":cmd,"evidence": hit[:160]})
     return findings
 
 def parse_hydra(output):
+    """Only hydra's real result row (``[port][service] host: .. login: ..
+    password: ..``) is a finding — and it names the service that actually
+    answered instead of stamping every hit as SSH :22."""
     findings = []
     for line in output.splitlines():
-        if 'login:' in line and 'password:' in line:
-            findings.append({"type":"default_cred","detail":line.strip(),"severity":"critical",
-                "path":"SSH :22","command":"hydra -l <user> -p <pass> ssh://<target>"})
+        m = re.search(
+            r'\[(\d+)\]\[([\w.-]+)\]\s+host:\s*(\S+)\s+login:\s*(\S+)\s+password:\s*(\S+)',
+            line)
+        if not m:
+            continue
+        port, svc, host, user, _pw = m.groups()
+        pw_shown = '***' if _pw else ''
+        findings.append({"type":"default_cred","detail":line.strip(),"severity":"critical",
+            "path":f"{svc.upper()} :{port}",
+            "command":f"hydra -l {user} -p '{pw_shown}' {svc}://{host}" if pw_shown
+                       else f"hydra -l {user} -P <wordlist> {svc}://{host}"})
     return findings
 
 def parse_msf(output):
@@ -2063,23 +2185,69 @@ def parse_api_auth(output):
 
 def parse_api_injection(output):
     findings = []
-    error_patterns = [
-        (r"SQL syntax|mysql_fetch|ORA-\d+|PSQLException|SQLiteException|you have an error in your sql",
+    # Server-side error REJECTIONS must not count as evidence: a 400 that echoes
+    # "unexpected token $", mentions the operator it refused, or restates a
+    # query is a negative result. Probe payload text echoed back is skipped too.
+    _REJECT = re.compile(
+        r'invalid|malformed|unexpected|not allowed|rejected|cannot parse|'
+        r'unable to parse|syntax error near \'|"error"\s*:', re.I)
+    sqli_sig = [
+        (r"SQL syntax[^\n]{0,40}MySQL|check the manual that corresponds to your MySQL",
          "SQL error in API response — SQL injection confirmed", "critical", "sqli"),
-        (r"Warning.*mysql|Warning.*pg_|Fatal error.*mysqli",
+        (r"ORA-\d{5}|SQLSTATE\[|PSQLException|SQLiteException",
+         "Database error in API response — SQL injection confirmed", "critical", "sqli"),
+        (r"Warning[^\n]{0,40}mysql|Fatal error[^\n]{0,40}mysqli|pg_query\(\)",
          "PHP DB warning in API — SQL injection / verbose errors", "critical", "sqli"),
-        (r"\{.*\$gt|operator.*\$ne|\$regex.*matched",
-         "NoSQL operator reflected in response — NoSQL injection", "critical", "nosqli"),
-        (r"SSTI_RESULT:[^\n]*\b49\b|\{\{7\*7\}\}.*\b49\b",
-         "SSTI confirmed: 7*7=49 in response — Server-Side Template Injection", "critical", "ssti"),
-        (r"Traceback|stack trace|at.*\(.*\)\s*$|Exception in thread",
-         "Stack trace / exception in API response — code disclosure", "high", "error_disclosure"),
     ]
-    lines_text = output
-    for pattern, msg, sev, ftype in error_patterns:
-        if re.search(pattern, lines_text, re.I):
-            findings.append({"type":ftype,"detail":msg,"severity":sev,
-                "path":"/api/v1 endpoint","command":"sqlmap -u 'http://<target>/api/v1/users?id=1' --level=5"})
+    for pattern, msg, sev, ftype in sqli_sig:
+        for line in output.splitlines():
+            if _REJECT.search(line):
+                continue
+            if re.search(pattern, line, re.I):
+                findings.append({"type":ftype,"detail":msg,"severity":sev,
+                    "path":"/api/v1 endpoint",
+                    "command":"sqlmap -u 'http://<target>/api/v1/users?id=1' --level=5"})
+                break
+    # NoSQL: the $gt/$ne/$regex operator must appear in an ACCEPTED response
+    # (data or identity returned), not in the echo of the payload the server
+    # rejected. Same rule for the reflected-operator wording.
+    for line in output.splitlines():
+        if _REJECT.search(line):
+            continue
+        if re.search(r'\{.*\$gt|\$ne\b|\$regex.*matched', line) and \
+                re.search(r'"(?:id|user|username|email|token|session|role)"\s*:', line, re.I):
+            findings.append({"type":"nosqli",
+                "detail":"NoSQL operator returned data in the API response — NoSQL injection",
+                "severity":"critical","path":"/api/v1 endpoint",
+                "command":"curl -X POST -H 'Content-Type: application/json' -d '{\"username\":{\"$gt\":\"\"}}' http://<target>/api/login"})
+            break
+    # SSTI: 49 only proves evaluation when the template syntax did NOT come back.
+    # "{{7*7}} ... 49" is a reflection plus an unrelated 49 elsewhere on the page.
+    for line in output.splitlines():
+        if 'SSTI_RESULT:' not in line:
+            continue
+        body = line.split('SSTI_RESULT:', 1)[1]
+        if re.search(r'\b49\b', body) and '{{7*7}}' not in body:
+            findings.append({"type":"ssti",
+                "detail":"SSTI confirmed: 7*7 evaluated to 49 in the response — Server-Side Template Injection",
+                "severity":"critical","path":"/api/v1/search?q=",
+                "command":"curl -sk 'http://<target>/api/v1/search?q={{7*7}}'"})
+            break
+    # Code disclosure needs a real stack frame / error artifact. The old
+    # ``at.*\\(.*\\)$`` arm matched ordinary prose such as
+    # "Request completed at 12:00 (UTC)" and reported a high finding.
+    _STACK = re.compile(
+        r'Traceback \(most recent call last\)|Exception in thread|'
+        r'\bat [\w$.]+\([\w$]+\.(?:java|kt|scala|groovy):\d+\)|'
+        r'File "[^"]+", line \d+|php on line \d+|on line \d+</b>|'
+        r'\bStack trace:|\bat [\w.$]+\.[A-Za-z]\w*\s*\(', re.I)
+    for line in output.splitlines():
+        if _STACK.search(line):
+            findings.append({"type":"error_disclosure",
+                "detail":"Stack trace / exception in API response — code disclosure",
+                "severity":"high","path":"/api/v1 endpoint",
+                "command":"curl -sk -X POST -H 'Content-Type: application/json' -d '{\"bad\":' http://<target>/api/v1/users"})
+            break
     return findings
 
 def parse_api_ssrf(output):
@@ -2211,7 +2379,7 @@ def parse_db_discovery(output):
         '9042': ('cassandra','Cassandra','medium'),
     }
     for line in output.splitlines():
-        m = re.match(r'(\d+)/tcp\s+open', line)
+        m = re.match(r'(\d+)/tcp\s+open(?!\|)', line)
         if m:
             port = m.group(1)
             if port in db_ports:
@@ -2222,28 +2390,43 @@ def parse_db_discovery(output):
     return findings
 
 def parse_db_unauth(output):
+    """Unauthenticated DB access must be proven by the server's own DATA.
+
+    Each service is checked for the artifact only it produces. Auth errors
+    (NOAUTH / 401 / "unauthorized") describe the exact opposite of this
+    finding, and a bare single-element JSON array is not a CouchDB DB list.
+    """
     findings = []
-    if re.search(r'PONG|redis_version', output, re.I):
+    denied = re.compile(r'NOAUTH|unauthorized|authentication|denied|forbidden|'
+                        r'security_exception|protected mode|WRONGPASS', re.I)
+    text = '\n'.join(l for l in output.splitlines() if not denied.search(l))
+    if re.search(r'(?m)^PONG$|redis_version\s*[:=]\s*\d', text, re.I):
         findings.append({"type":"db_unauth_access","severity":"critical",
             "detail":"Redis accessible without authentication — full read/write/config access",
             "path":"Redis :6379",
             "command":"redis-cli -h <target> ping; redis-cli -h <target> KEYS '*'"})
-    if re.search(r'mongodb-databases|totalSize|databases\s*=\s*\[|admin\s*\.\s*local', output, re.I):
+    if re.search(r'mongodb-databases|totalSize|databases\s*=\s*\[|admin\s*\.\s*local', text, re.I):
         findings.append({"type":"db_unauth_access","severity":"critical",
             "detail":"MongoDB accessible without authentication — all databases enumerable",
             "path":"MongoDB :27017",
             "command":"mongo <target>:27017 --eval 'db.adminCommand({listDatabases:1})'"})
-    if re.search(r'health.*green|indices.*pri|index.*docs', output, re.I):
+    # Elasticsearch: the _cat/indices header row, or the cluster-health document.
+    if re.search(r'\bhealth\s+status\s+index\b|'
+                 r'"cluster_name"\s*:[^\n]{0,80}"status"\s*:\s*"(?:green|yellow)"|'
+                 r'"status"\s*:\s*"(?:green|yellow)"[^\n]{0,80}"cluster_name"', text, re.I):
         findings.append({"type":"db_unauth_access","severity":"critical",
-            "detail":"Elasticsearch accessible without auth — all indices readable",
+            "detail":"Elasticsearch accessible without auth — index/cluster data readable",
             "path":"Elasticsearch :9200",
             "command":"curl http://<target>:9200/_cat/indices?v"})
-    if re.search(r'\["_all_dbs"\]|\["[a-z_]+"\]', output):
+    # CouchDB: its welcome document, or a list carrying the system databases.
+    if re.search(r'"couchdb"\s*:\s*"Welcome"|'
+                 r'"?(_users|_replicator|_global_changes)"?\s*[,}\]]', text, re.I):
         findings.append({"type":"db_unauth_access","severity":"high",
             "detail":"CouchDB accessible without auth — database list exposed",
             "path":"CouchDB :5984",
             "command":"curl http://<target>:5984/_all_dbs"})
-    if re.search(r'results.*series|databases.*name', output, re.I):
+    # InfluxDB: the SHOW DATABASES envelope (results -> series -> columns).
+    if re.search(r'"results"\s*:[^\n]{0,140}"series"[^\n]{0,140}"columns"', text, re.I):
         findings.append({"type":"db_unauth_access","severity":"high",
             "detail":"InfluxDB accessible without auth — SHOW DATABASES returned data",
             "path":"InfluxDB :8086",
@@ -2437,16 +2620,20 @@ def parse_sqlmap(output):
                 "detail":"sqlmap confirmed current DB user has DBA privileges",
                 "path":"database privilege",
                 "command":"sqlmap -u 'http://<target>/?id=1' --batch --privileges"})
-        # File system access
-        if re.search(r"file-read|INTO OUTFILE|INTO DUMPFILE|file privilege", line, re.I):
+        # File system access — sqlmap only proves this when it actually fetched
+        # or wrote a file. Payload text ("INTO OUTFILE" in a tested payload) is
+        # not a confirmed FILE privilege and used to be reported as one.
+        if re.search(r"fetching file|file has been saved|file written to|\.\.\. file '", line, re.I) \
+                and not any(f['type'] == 'sqli_file_access' for f in findings):
             findings.append({"type":"sqli_file_access","severity":"critical",
-                "detail":"SQL injection allows file system read/write (FILE privilege confirmed)",
+                "detail":"SQL injection allows file system read/write (sqlmap read/wrote a file)",
                 "path":"server filesystem via SQL",
                 "command":"sqlmap -u 'http://<target>/?id=1' --batch --file-read='/etc/passwd'"})
-        # OS shell
-        if re.search(r"os-shell|command execution|xp_cmdshell", line, re.I):
+        # OS shell — only an actual shell prompt / command output counts.
+        if re.search(r"os-shell>|command standard output|shell command executed|xp_cmdshell.*output|"
+                     r"[Ii]nteractive OS shell", line):
             findings.append({"type":"sqli_os_rce","severity":"critical",
-                "detail":"SQL injection may allow OS command execution (os-shell / xp_cmdshell)",
+                "detail":"SQL injection yielded OS command execution (sqlmap interactive shell)",
                 "path":"OS via SQL injection",
                 "command":"sqlmap -u 'http://<target>/?id=1' --batch --os-shell"})
         # Second-order detected
@@ -2689,7 +2876,7 @@ def parse_version_cve(output, sess):
     is derived from that score's band."""
     findings = []
     for line in output.splitlines():
-        if not re.search(r'\d+/tcp\s+open', line):
+        if not re.search(r'\d+/tcp\s+open(?!\|)', line):
             continue
         port_m = re.search(r'(\d+)/tcp', line)
         path = f":{port_m.group(1)}" if port_m else "service"
@@ -3113,7 +3300,8 @@ def parse_xss_probe(output):
     findings = []
     for line in output.splitlines():
         # XSS reflection
-        if re.search(r'onerror|alert\(|<script', line, re.I) and re.search(r'\d{3}', line):
+        if re.search(r'onerror\s*=|alert\(|<script', line, re.I) and \
+                re.search(r'\b[1-5]\d\d\b', line):
             param_m = re.search(r'(\w+)\s+XSS\s+(\d+):\s*(\S+)', line)
             if param_m:
                 param, code, refl = param_m.group(1), param_m.group(2), param_m.group(3)
@@ -4126,6 +4314,23 @@ _ENUM_UNKNOWN_RE = re.compile(r'unknown|not found|no such|invalid (?:user|accoun
 _ENUM_WRONGPW_RE = re.compile(r'incorrect password|wrong password|invalid password|'
                               r'password is incorrect|bad credentials', re.I)
 _JWT_RE = re.compile(r'^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+$')
+
+
+def _jwt_header(token):
+    """Decode a JWT header segment, returning {} unless it is a JSON object.
+
+    base64url padding is derived from the segment length (``+ '==='`` is only
+    valid for some lengths), and any decode failure returns {} so the caller
+    can say "not assessed" instead of inventing ``alg=none``."""
+    seg = str(token or '').split('.')[0]
+    if not seg:
+        return {}
+    try:
+        raw = base64.urlsafe_b64decode(seg + '=' * (-len(seg) % 4))
+        parsed = json.loads(raw.decode('utf-8', 'ignore'))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 ADMIN_PATHS = ['/admin', '/admin/', '/admin/users', '/admin/settings', '/administrator',
                '/manage', '/console', '/api/admin', '/api/admin/users', '/api/users',
                '/api/v1/users', '/api/user/list']
@@ -4630,22 +4835,24 @@ def _session_jwt(sid, sub_id, sub):
     r = _http('POST', lg['url'], data=_build_login(lg, ac['username'], ac['password']))
     c = _resp_cookie(r); val = c.split('=', 1)[1] if c and '=' in c else ''
     if val and _JWT_RE.match(val):
-        try:
-            import base64 as _b64
-            hdr = json.loads(_b64.urlsafe_b64decode(val.split('.')[0] + '===').decode('utf-8', 'ignore'))
-        except Exception:
-            hdr = {}
-        alg = str(hdr.get('alg', ''))
-        lines.append((f"[session] JWT session token, alg={alg or 'unknown'}", "info"))
-        if alg.lower() in ('none', ''):
-            findings.append({"type": "jwt_weakness", "severity": "high", "path": lg['path'],
-                             "detail": f"Session JWT declares alg='{alg or 'none'}' (unsecured/absent) — "
-                                       f"signature can be stripped or forged (CWE-347).",
-                             "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
+        hdr = _jwt_header(val)
+        if not hdr:
+            # An undecodable header is NOT evidence of alg=none: claiming an
+            # unsigned token here would fabricate an auth-bypass finding.
+            lines.append(("[session] JWT-shaped token but the header segment could not "
+                          "be decoded — algorithm not assessed", "info"))
         else:
-            findings.append({"type": "info", "severity": "info", "path": lg['path'],
-                             "detail": f"JWT-based session observed with alg='{alg}'; signature/secret "
-                                       f"strength not assessed here.", "command": _req_line('POST', lg['url'])})
+            alg = str(hdr.get('alg', '')).strip()
+            lines.append((f"[session] JWT session token, alg={alg or 'unknown'}", "info"))
+            if alg.lower() in ('none', ''):
+                findings.append({"type": "jwt_weakness", "severity": "high", "path": lg['path'],
+                                 "detail": f"Session JWT declares alg='{alg or 'none'}' (unsecured/absent) — "
+                                           f"signature can be stripped or forged (CWE-347).",
+                                 "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
+            else:
+                findings.append({"type": "info", "severity": "info", "path": lg['path'],
+                                 "detail": f"JWT-based session observed with alg='{alg}'; signature/secret "
+                                           f"strength not assessed here.", "command": _req_line('POST', lg['url'])})
     else:
         lines.append(("[session] no JWT-format session token observed (opaque cookie)", "meta"))
     _finish_inproc(sid, sub_id, findings, lines)
@@ -4879,7 +5086,7 @@ def _execute_substage(sid, sub_id):
     sess['findings'][sub_id] = findings
 
     if sub_id == 'recon_ports':
-        port_matches = re.findall(r'(\d+)/tcp\s+open', output)
+        port_matches = re.findall(r'(?m)^(\d+)/tcp\s+open(?!\|)', output)
         if port_matches:
             sess['ports_found'] = ','.join(list(dict.fromkeys(port_matches))[:35])
         for svc_key in VERSION_DB:
@@ -5140,7 +5347,13 @@ def approve_stage(sid):
         # Serial stages run one substage at a time; _advance_chain starts the
         # next one when the current one completes. Launching them all here ran
         # a strictly ordered chain concurrently and corrupted its dependencies.
-        targets = [stage['substages'][0]['id']] if stage['substages'] else []
+        # The entry point is the first substage that has NOT already run: when
+        # the operator had approved substage 1 individually and it completed,
+        # "launch substages[0]" was refused by the idempotent launcher and the
+        # stage dead-ended with nothing running and no advance to trigger.
+        with sess['lock']:
+            done = set(sess['completed']) | set(sess['skipped'])
+        targets = [s['id'] for s in stage['substages'] if s['id'] not in done][:1]
     for s_id in targets:
         if _launch_substage(sid, s_id):
             launched.append(s_id)
@@ -5191,6 +5404,9 @@ def status(sid):
     return jsonify({
         "completed": sess['completed'], "approved": sess['approved'],
         "skipped": sess['skipped'],
+        # Started-but-unfinished substages, so a reconnecting UI can show
+        # RUNNING instead of falling back to AWAITING APPROVAL.
+        "launched": sorted(sess.get('launched') or []),
         "finding_counts": {k:len(v) for k,v in sess['findings'].items()},
         "findings": sess['findings'],
         "ports_found": sess.get('ports_found',''),

@@ -1623,6 +1623,15 @@ async function resyncStatus() {
   (d.skipped || []).forEach(id => {
     if (subStatus[id] !== 'skipped') { setSS(id, 'skipped'); changed = true; }
   });
+  // Substages the server started but has not finished must show RUNNING after
+  // a reconnect — otherwise the pane offers "Approve & Run" for work that is
+  // already executing and looks stalled.
+  (d.launched || []).forEach(id => {
+    if (subStatus[id] !== 'done' && subStatus[id] !== 'skipped' && subStatus[id] !== 'running') {
+      setSS(id, 'running');
+      changed = true;
+    }
+  });
   if (d.findings) {
     Object.entries(d.findings).forEach(([id, fl]) => {
       if (!Array.isArray(fl) || !fl.length) return;
@@ -2007,7 +2016,10 @@ function el(tag, cls = '') {
 }
 
 function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Quotes are escaped too: several esc() sinks sit inside attribute values
+  // (data-sub, title), where a bare " would break out of the attribute.
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 
