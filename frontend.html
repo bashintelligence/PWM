@@ -1472,6 +1472,7 @@ async function startSession(e) {
 
   if (ES) { ES.close(); ES = null; }
   SID = null; allFindings = {}; doneSubs = 0; allDone = false;
+  CMD_TARGET = ''; CMD_BASE = '';
   CHAIN.forEach(s => s.substages.forEach(sub => subStatus[sub.id] = 'pending'));
 
   buildNav();
@@ -1501,19 +1502,10 @@ async function startSession(e) {
     SID = d.sid;
     clog(`session ${SID.slice(0,8)} · ${d.target} [${d.target_type}]`, 'ev');
 
-    // inject command previews
-    CHAIN.forEach(stage => stage.substages.forEach(sub => {
-      const ce = document.getElementById(`cmd-${sub.id}`);
-      if (ce && sub.cmd_template) {
-        ce.textContent = sub.cmd_template
-          .replace(/\{target\}/g, d.target)
-          .replace(/\{base_url\}/g, `http://${d.target}`)
-          .replace(/\{outdir\}/g, `/tmp/pwm_${SID.slice(0,8)}`)
-          .replace(/\{ports\}/g, '21,22,23,25,80,443,445,3306,3389,8080')
-          .replace(/\{banner_search\}/g, d.target)
-          .replace(/\{network\}/g, d.target);
-      }
-    }));
+    // inject command previews, using the origin the server actually resolved
+    CMD_TARGET = d.target;
+    CMD_BASE = d.base_url || `http://${d.target}`;
+    applyCmdPreviews();
 
     // show stage-level "run all" buttons
     CHAIN.forEach(stage => {
@@ -1604,6 +1596,24 @@ function refreshProgress() {
 // Reconcile local state with the server after every (re)connect. The SSE
 // stream only replays buffered events; a long-lived session may have missed
 // completions entirely while disconnected.
+let CMD_BASE = '', CMD_TARGET = '';
+function applyCmdPreviews() {
+  if (!CMD_TARGET || !SID) return;
+  const host = CMD_BASE.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  CHAIN.forEach(stage => stage.substages.forEach(sub => {
+    const ce = document.getElementById(`cmd-${sub.id}`);
+    if (!ce || !sub.cmd_template) return;
+    ce.textContent = sub.cmd_template
+      .replace(/\{target\}/g, CMD_TARGET)
+      .replace(/\{base_url\}/g, CMD_BASE)
+      .replace(/\{base_host\}/g, host)
+      .replace(/\{outdir\}/g, `/tmp/pwm_${SID.slice(0,8)}`)
+      .replace(/\{ports\}/g, '21,22,23,25,80,443,445,3306,3389,8080')
+      .replace(/\{banner_search\}/g, CMD_TARGET)
+      .replace(/\{network\}/g, CMD_TARGET);
+  }));
+}
+
 async function resyncStatus() {
   if (!SID) return;
   const ft = fetchTimeout(8000);
@@ -1615,6 +1625,11 @@ async function resyncStatus() {
     return;
   } finally { ft.cancel(); }
   if (!d || d.error) return;
+  // Recon discovers the web port; refresh previews so they stop claiming :80.
+  if (d.base_url && d.base_url !== CMD_BASE && CMD_TARGET) {
+    CMD_BASE = d.base_url;
+    applyCmdPreviews();
+  }
 
   let changed = false;
   (d.completed || []).forEach(id => {

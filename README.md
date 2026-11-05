@@ -75,3 +75,41 @@ python3 app.py
 ```bash
 python app.py
 ```
+## Testing
+
+Seven standalone audit suites cover the "no fabricated results" guards:
+
+| Suite | Covers |
+|---|---|
+| `test_engine_fixes.py` | port-state parsing, signature false positives, JWT header decode, evidence URLs, stage sequencing |
+| `test_parser_false_positives.py` | negative/positive tool-output fixtures for every substage parser |
+| `test_templates.py` | probe time bounds, template↔parser contracts, timeout-vs-delay handling |
+| `test_session_checks.py` | session-id and cookie/SameSite evidence rules |
+| `test_inprocess_probes.py` | in-process auth/registration probes against a correct vs. flawed app |
+| `test_live_parsers.py` | runs the real API/CMS/DB commands against the fixture and dispatches output to the real parsers |
+| `test_report_status.py` | report metrics and exit-status truth |
+
+```bash
+# all suites (use the venv interpreter that has requirements installed)
+venv/bin/python3 tests/run_all.py
+
+# one suite only
+venv/bin/python3 tests/run_all.py templates
+```
+
+Each suite runs in-process and needs no server or external target. Two of them
+start the bundled fixture `tests/fixtures/vuln_app.py`: `test_inprocess_probes.py`
+on 127.0.0.1:8099/8100 and `test_live_parsers.py` on 127.0.0.1:8110/8111. The
+fixture has a `secure` mode (correct behaviour — a correct tool must stay
+silent) and a `vuln` mode (deliberately flawed — detections must still fire).
+It serves the login/registration surface, an API surface (users, admin, config,
+search/render, fetch/proxy, swagger, actuator, GraphQL) and CMS fingerprints
+(WordPress, Drupal, Joomla), and in `vuln` mode also starts database-service
+stubs on their real ports (Redis 6379, InfluxDB 8086, Elasticsearch 9200,
+CouchDB 5984) so the DB probes have a live target. Set `FIXTURE_SERVICES=0` to
+skip those stubs, `FIXTURE_MODE=vuln|secure` to choose the mode, and
+`PWM_FIXTURE_VULN_PORT` / `PWM_FIXTURE_SEC_PORT` to move the web listeners.
+`test_live_parsers.py` therefore needs `curl`, `nmap` and `redis-cli` (and uses
+`wpscan` when present); substages whose tools are missing are reported as
+skipped rather than passing. A suite exits non-zero on failure and the runner
+exits non-zero if any suite fails.

